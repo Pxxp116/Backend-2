@@ -9,6 +9,7 @@ const { Pool } = require('pg');
 const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -18,13 +19,30 @@ app.use(cors());
 app.use(express.json());
 
 // Configuración de base de datos PostgreSQL
-const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'gastrobot',
-  password: process.env.DB_PASSWORD || 'password',
-  port: process.env.DB_PORT || 5432,
-});
+// Detectar si estamos en Railway o local
+const isProduction = process.env.NODE_ENV === 'production' || process.env.DATABASE_URL;
+
+let pool;
+if (process.env.DATABASE_URL) {
+  // Configuración para Railway/Producción
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false
+    }
+  });
+  console.log('📦 Usando DATABASE_URL de Railway');
+} else {
+  // Configuración para desarrollo local
+  pool = new Pool({
+    user: process.env.DB_USER || 'postgres',
+    host: process.env.DB_HOST || 'localhost',
+    database: process.env.DB_NAME || 'gastrobot',
+    password: process.env.DB_PASSWORD || 'password',
+    port: process.env.DB_PORT || 5432,
+  });
+  console.log('💻 Usando configuración local de base de datos');
+}
 
 // ============================================
 // ARCHIVO ESPEJO - Sistema de actualización
@@ -1301,9 +1319,24 @@ app.get('/api/admin/estadisticas', async (req, res) => {
 
 async function inicializarDB() {
   try {
+    console.log('🔄 Intentando conectar a la base de datos...');
+    
     // Verificar conexión
     await pool.query('SELECT NOW()');
     console.log('✅ Conexión a base de datos establecida');
+    
+    // Crear tablas si no existen (para Railway)
+    if (isProduction) {
+      console.log('🏗️ Verificando/creando estructura de base de datos...');
+      
+      try {
+        // Ejecutar el script de inicialización
+        const initDatabase = require('./init-database');
+        await initDatabase();
+      } catch (initError) {
+        console.log('ℹ️ Las tablas ya existen o fueron creadas manualmente');
+      }
+    }
     
     // Verificar si existen las tablas principales
     const tablaRestaurante = await pool.query(`
@@ -1314,16 +1347,31 @@ async function inicializarDB() {
     `);
     
     if (!tablaRestaurante.rows[0].exists) {
-      console.log('⚠️  Las tablas no existen. Por favor, ejecuta el archivo schema.sql primero.');
-      process.exit(1);
+      console.log('⚠️  Las tablas no existen. Creando estructura de base de datos...');
+      
+      // Si las tablas no existen, intentar crearlas
+      const initDatabase = require('./init-database');
+      await initDatabase();
     }
     
     console.log('✅ Base de datos inicializada correctamente');
     
   } catch (error) {
     console.error('❌ Error conectando a la base de datos:', error);
-    console.log('Por favor, verifica la configuración de PostgreSQL');
-    process.exit(1);
+    
+    if (isProduction) {
+      console.log('🔧 En Railway: Verifica que hayas añadido PostgreSQL a tu proyecto');
+      console.log('   Las variables DATABASE_URL deberían estar configuradas automáticamente');
+      
+      // En producción, esperar y reintentar
+      console.log('⏳ Reintentando conexión en 10 segundos...');
+      setTimeout(() => {
+        inicializarDB();
+      }, 10000);
+    } else {
+      console.log('Por favor, verifica la configuración de PostgreSQL local');
+      process.exit(1);
+    }
   }
 }
 

@@ -5,16 +5,26 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 // Usar DATABASE_URL de Railway o variables individuales
-const connectionString = process.env.DATABASE_URL;
-const pool = connectionString 
-  ? new Pool({ connectionString, ssl: { rejectUnauthorized: false } })
-  : new Pool({
-      user: process.env.DB_USER || 'postgres',
-      host: process.env.DB_HOST || 'localhost',
-      database: process.env.DB_NAME || 'gastrobot',
-      password: process.env.DB_PASSWORD || 'password',
-      port: process.env.DB_PORT || 5432,
-    });
+let pool;
+
+if (process.env.DATABASE_URL) {
+  console.log('🚀 Conectando con DATABASE_URL de Railway...');
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false
+    }
+  });
+} else {
+  console.log('💻 Conectando con configuración local...');
+  pool = new Pool({
+    user: process.env.DB_USER || 'postgres',
+    host: process.env.DB_HOST || 'localhost',
+    database: process.env.DB_NAME || 'gastrobot',
+    password: process.env.DB_PASSWORD || 'password',
+    port: process.env.DB_PORT || 5432,
+  });
+}
 
 async function initDatabase() {
   console.log('🚀 Iniciando creación de base de datos...');
