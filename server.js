@@ -1476,6 +1476,20 @@ async function inicializarDB() {
     // Verificar conexión
     await pool.query('SELECT NOW()');
     console.log('✅ Conexión a base de datos establecida');
+    console.log('🔄 Aplicando migraciones...');
+    try {
+      await pool.query(`
+        ALTER TABLE restaurante 
+        ADD COLUMN IF NOT EXISTS tipo_cocina VARCHAR(100) DEFAULT 'Mediterránea',
+        ADD COLUMN IF NOT EXISTS facebook VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS instagram VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS twitter VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS tripadvisor VARCHAR(200)
+      `);
+      console.log('✅ Migraciones aplicadas');
+    } catch (migrationError) {
+      console.log('ℹ️ Migraciones ya aplicadas o error:', migrationError.message);
+    }
     
     // Crear tablas si no existen (para Railway)
     if (isProduction) {

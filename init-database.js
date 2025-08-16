@@ -476,6 +476,70 @@ async function initDatabase() {
 
       console.log('✅ Datos iniciales insertados');
     }
+          // Añadir esto al FINAL de la función initDatabase() en init-database.js
+      // JUSTO ANTES del console.log('🎉 Base de datos inicializada correctamente');
+
+      // ============================================
+      // MIGRACIÓN: Añadir columnas nuevas si no existen
+      // ============================================
+      console.log('🔄 Verificando columnas nuevas...');
+
+      try {
+        // Verificar y añadir columna tipo_cocina
+        await pool.query(`
+          ALTER TABLE restaurante 
+          ADD COLUMN IF NOT EXISTS tipo_cocina VARCHAR(100) DEFAULT 'Mediterránea'
+        `);
+        console.log('✅ Columna tipo_cocina verificada');
+      } catch (err) {
+        console.log('ℹ️ Columna tipo_cocina ya existe o error:', err.message);
+      }
+
+      try {
+        // Verificar y añadir columna facebook
+        await pool.query(`
+          ALTER TABLE restaurante 
+          ADD COLUMN IF NOT EXISTS facebook VARCHAR(200)
+        `);
+        console.log('✅ Columna facebook verificada');
+      } catch (err) {
+        console.log('ℹ️ Columna facebook ya existe o error:', err.message);
+      }
+
+      try {
+        // Verificar y añadir columna instagram
+        await pool.query(`
+          ALTER TABLE restaurante 
+          ADD COLUMN IF NOT EXISTS instagram VARCHAR(200)
+        `);
+        console.log('✅ Columna instagram verificada');
+      } catch (err) {
+        console.log('ℹ️ Columna instagram ya existe o error:', err.message);
+      }
+
+      try {
+        // Verificar y añadir columna twitter
+        await pool.query(`
+          ALTER TABLE restaurante 
+          ADD COLUMN IF NOT EXISTS twitter VARCHAR(200)
+        `);
+        console.log('✅ Columna twitter verificada');
+      } catch (err) {
+        console.log('ℹ️ Columna twitter ya existe o error:', err.message);
+      }
+
+      try {
+        // Verificar y añadir columna tripadvisor
+        await pool.query(`
+          ALTER TABLE restaurante 
+          ADD COLUMN IF NOT EXISTS tripadvisor VARCHAR(200)
+        `);
+        console.log('✅ Columna tripadvisor verificada');
+      } catch (err) {
+        console.log('ℹ️ Columna tripadvisor ya existe o error:', err.message);
+      }
+
+      console.log('✅ Migración de columnas completada');
 
     console.log('🎉 Base de datos inicializada correctamente');
     
