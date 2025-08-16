@@ -36,23 +36,24 @@ async function initDatabase() {
       -- TABLA: RESTAURANTE
       -- ==============================================
       CREATE TABLE IF NOT EXISTS restaurante (
-        id SERIAL PRIMARY KEY,
-        nombre VARCHAR(100) NOT NULL DEFAULT 'Mi Restaurante',
-        tipo_cocina VARCHAR(100) DEFAULT 'Mediterránea',
-        direccion TEXT DEFAULT 'Calle Principal 123, Barcelona',
-        telefono VARCHAR(20) DEFAULT '+34 900 123 456',
-        email VARCHAR(100) DEFAULT 'info@mirestaurante.com',
-        web VARCHAR(100) DEFAULT 'www.mirestaurante.com',
-        logo_url TEXT,
-        descripcion TEXT DEFAULT 'Cocina mediterránea moderna',
-        facebook VARCHAR(200),
-        instagram VARCHAR(200),
-        twitter VARCHAR(200),
-        tripadvisor VARCHAR(200),
-        coordenadas_lat DECIMAL(10, 8),
-        coordenadas_lng DECIMAL(11, 8),
-        creado_en TIMESTAMP DEFAULT NOW(),
-        actualizado_en TIMEST
+      id SERIAL PRIMARY KEY,
+      nombre VARCHAR(100) NOT NULL DEFAULT 'Mi Restaurante',
+      tipo_cocina VARCHAR(100) DEFAULT 'Mediterránea',  -- IMPORTANTE
+      direccion TEXT DEFAULT 'Calle Principal 123, Barcelona',
+      telefono VARCHAR(20) DEFAULT '+34 900 123 456',
+      email VARCHAR(100) DEFAULT 'info@mirestaurante.com',
+      web VARCHAR(100) DEFAULT 'www.mirestaurante.com',
+      logo_url TEXT,
+      descripcion TEXT DEFAULT 'Cocina mediterránea moderna',
+      facebook VARCHAR(200),     -- IMPORTANTE
+      instagram VARCHAR(200),    -- IMPORTANTE  
+      twitter VARCHAR(200),      -- IMPORTANTE
+      tripadvisor VARCHAR(200),  -- IMPORTANTE
+      coordenadas_lat DECIMAL(10, 8),
+      coordenadas_lng DECIMAL(11, 8),
+      creado_en TIMESTAMP DEFAULT NOW(),
+      actualizado_en TIMESTAMP DEFAULT NOW()
+    );
 
       -- ==============================================
       -- TABLA: MESAS
