@@ -377,22 +377,26 @@ function normalizarDatosParaGPT(datos) {
 
         // Normalizar fecha
         if (r.fecha) {
-          reserva.fecha = r.fecha.split('T')[0]; // YYYY-MM-DD
+          if (typeof r.fecha === 'string') {
+            reserva.fecha = r.fecha.split('T')[0]; // YYYY-MM-DD
+          } else if (r.fecha instanceof Date) {
+            reserva.fecha = r.fecha.toISOString().split('T')[0]; // YYYY-MM-DD
+          }
         }
 
         // Normalizar hora (solo si es válida)
-        if (r.hora && r.hora.trim() && r.hora !== '00:00:00') {
+        if (r.hora && typeof r.hora === 'string' && r.hora.trim() && r.hora !== '00:00:00') {
           reserva.hora = r.hora;
         }
 
         // Campos opcionales
-        if (r.telefono && r.telefono.trim()) {
+        if (r.telefono && typeof r.telefono === 'string' && r.telefono.trim()) {
           reserva.telefono = r.telefono.trim();
         }
-        if (r.email && r.email.trim()) {
+        if (r.email && typeof r.email === 'string' && r.email.trim()) {
           reserva.email = r.email.trim();
         }
-        if (r.notas && r.notas.trim()) {
+        if (r.notas && typeof r.notas === 'string' && r.notas.trim()) {
           reserva.notas = r.notas.trim();
         }
 
