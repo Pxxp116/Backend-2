@@ -1023,7 +1023,7 @@ app.get('/api/admin/mesas', async (req, res) => {
 });
 
 app.post('/api/admin/mesas', async (req, res) => {
-  const { numero_mesa, capacidad, zona, ubicacion, unible } = req.body;
+  const { numero_mesa, nombre, capacidad, zona, ubicacion, unible } = req.body;
   
   // Validación de entrada
   if (!numero_mesa || !capacidad) {
@@ -1048,10 +1048,10 @@ app.post('/api/admin/mesas', async (req, res) => {
     }
     
     const resultado = await pool.query(
-      `INSERT INTO mesas (numero_mesa, capacidad, zona, ubicacion, unible, activa) 
-       VALUES ($1, $2, $3, $4, $5, true) 
+      `INSERT INTO mesas (numero_mesa, nombre, capacidad, zona, ubicacion, unible, activa) 
+       VALUES ($1, $2, $3, $4, $5, $6, true) 
        RETURNING *`,
-      [numero_mesa, capacidad, zona || null, ubicacion || null, unible || false]
+      [numero_mesa, nombre || null, capacidad, zona || null, ubicacion || null, unible || false]
     );
     
     await registrarCambio('crear_mesa', resultado.rows[0].id, null, resultado.rows[0], 'admin');
@@ -1080,7 +1080,7 @@ app.post('/api/admin/mesas', async (req, res) => {
 
 app.put('/api/admin/mesas/:id', async (req, res) => {
   const { id } = req.params;
-  const { numero_mesa, capacidad, zona, ubicacion, activa } = req.body;
+  const { numero_mesa, nombre, capacidad, zona, ubicacion, activa } = req.body;
   
   try {
     // Obtener datos anteriores para el historial
@@ -1088,10 +1088,10 @@ app.put('/api/admin/mesas/:id', async (req, res) => {
     
     const resultado = await pool.query(
       `UPDATE mesas 
-       SET numero_mesa = COALESCE($1, numero_mesa), capacidad = COALESCE($2, capacidad), zona = $3, ubicacion = $4, activa = COALESCE($5, activa)
-       WHERE id = $6
+       SET numero_mesa = COALESCE($1, numero_mesa), nombre = $2, capacidad = COALESCE($3, capacidad), zona = $4, ubicacion = $5, activa = COALESCE($6, activa)
+       WHERE id = $7
        RETURNING *`,
-      [numero_mesa, capacidad, zona, ubicacion, activa, id]
+      [numero_mesa, nombre, capacidad, zona, ubicacion, activa, id]
     );
     
     if (resultado.rows.length === 0) {
@@ -1570,6 +1570,13 @@ async function inicializarDB() {
         ADD COLUMN IF NOT EXISTS twitter VARCHAR(200),
         ADD COLUMN IF NOT EXISTS tripadvisor VARCHAR(200)
       `);
+      
+      // Agregar columna nombre a mesas
+      await pool.query(`
+        ALTER TABLE mesas 
+        ADD COLUMN IF NOT EXISTS nombre VARCHAR(100)
+      `);
+      
       console.log('✅ Migraciones aplicadas');
     } catch (migrationError) {
       console.log('ℹ️ Migraciones ya aplicadas o error:', migrationError.message);
