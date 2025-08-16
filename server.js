@@ -445,6 +445,16 @@ app.get('/api/resumen', (req, res) => {
 // ENDPOINTS PARA EL GPT PERSONALIZADO
 // ============================================
 
+// 🔧 Endpoint de control manual para regenerar el espejo desde navegador o curl
+app.get('/api/forzar-espejo', async (req, res) => {
+  try {
+    await actualizarArchivoEspejo();
+    res.json({ exito: true, mensaje: 'Espejo generado correctamente' });
+  } catch (error) {
+    res.status(500).json({ exito: false, mensaje: 'Error al generar el espejo', error: error.message });
+  }
+});
+
 // ENDPOINT PRINCIPAL: Obtener Archivo Espejo completo desde espejo.json
 app.get('/api/espejo', async (req, res) => {
   try {
