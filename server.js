@@ -1207,6 +1207,9 @@ app.post('/api/admin/menu/plato', async (req, res) => {
   try {
     await client.query('BEGIN');
     
+    // Convertir tipos de datos para compatibilidad con la BD
+    const picanteValue = picante === true ? 1 : (picante === false ? 0 : (picante || 0));
+    
     const platoQuery = await client.query(
       `INSERT INTO platos (
         categoria_id, nombre, descripcion, precio, imagen_url,
@@ -1215,7 +1218,7 @@ app.post('/api/admin/menu/plato', async (req, res) => {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW()) RETURNING *`,
       [categoria_id, nombre, descripcion, precio, imagen_url,
        vegetariano || false, vegano || false, sin_gluten || false, 
-       picante || false, recomendado || false, disponible !== false]
+       picanteValue, recomendado || false, disponible !== false]
     );
     
     const plato = platoQuery.rows[0];
@@ -1286,6 +1289,9 @@ app.put('/api/admin/menu/plato/:id', async (req, res) => {
       return res.status(404).json({ exito: false, mensaje: "Plato no encontrado" });
     }
     
+    // Convertir tipos de datos para compatibilidad con la BD
+    const picanteValue = picante === true ? 1 : (picante === false ? 0 : picante);
+    
     // Actualizar plato
     const platoActualizado = await client.query(`
       UPDATE platos 
@@ -1305,7 +1311,7 @@ app.put('/api/admin/menu/plato/:id', async (req, res) => {
       WHERE id = $12
       RETURNING *
     `, [categoria_id, nombre, descripcion, precio, imagen_url, 
-        vegetariano, vegano, sin_gluten, picante, recomendado, disponible, id]);
+        vegetariano, vegano, sin_gluten, picanteValue, recomendado, disponible, id]);
     
     // Actualizar alérgenos si se proporcionan
     if (alergenos !== undefined) {
