@@ -1241,7 +1241,13 @@ app.post('/api/admin/menu/plato', async (req, res) => {
       }
     }
     
-    await registrarCambio('crear_plato', plato.id, null, plato, 'admin');
+    // Intentar registrar cambio (opcional)
+    try {
+      await registrarCambio('crear_plato', plato.id, null, plato, 'admin');
+    } catch (registroError) {
+      console.warn('Warning: No se pudo registrar el cambio en el historial:', registroError.message);
+    }
+    
     await client.query('COMMIT');
     await actualizarArchivoEspejo();
     
@@ -1328,7 +1334,13 @@ app.put('/api/admin/menu/plato/:id', async (req, res) => {
       }
     }
     
-    await registrarCambio('actualizar_plato', id, platoAnterior.rows[0], platoActualizado.rows[0], 'admin');
+    // Intentar registrar cambio (opcional)
+    try {
+      await registrarCambio('actualizar_plato', id, platoAnterior.rows[0], platoActualizado.rows[0], 'admin');
+    } catch (registroError) {
+      console.warn('Warning: No se pudo registrar el cambio en el historial:', registroError.message);
+    }
+    
     await client.query('COMMIT');
     await actualizarArchivoEspejo();
     
@@ -1365,7 +1377,13 @@ app.delete('/api/admin/menu/plato/:id', async (req, res) => {
     // Eliminar el plato
     await pool.query('DELETE FROM platos WHERE id = $1', [id]);
     
-    await registrarCambio('eliminar_plato', id, platoAnterior.rows[0], null, 'admin');
+    // Intentar registrar cambio (opcional)
+    try {
+      await registrarCambio('eliminar_plato', id, platoAnterior.rows[0], null, 'admin');
+    } catch (registroError) {
+      console.warn('Warning: No se pudo registrar el cambio en el historial:', registroError.message);
+    }
+    
     await actualizarArchivoEspejo();
     
     res.json({
