@@ -192,6 +192,169 @@ async function actualizarArchivoEspejo() {
   }
 }
 
+// ============================================
+// SISTEMA DE SINCRONIZACIÓN DINÁMICA
+// ============================================
+
+/**
+ * Genera un archivo espejo.json actualizado como fuente única de verdad
+ * Optimizado para el GPT personalizado
+ */
+async function generarEspejo() {
+  try {
+    const inicio = Date.now();
+    console.log('🔄 Generando nuevo archivo espejo.json...');
+    
+    const espejo = {};
+    
+    // 1. Información del restaurante
+    const restauranteQuery = await pool.query('SELECT * FROM restaurante LIMIT 1');
+    espejo.restaurante = {
+      nombre: restauranteQuery.rows[0]?.nombre || '',
+      telefono: restauranteQuery.rows[0]?.telefono || '',
+      email: restauranteQuery.rows[0]?.email || '',
+      direccion: restauranteQuery.rows[0]?.direccion || '',
+      sitio_web: restauranteQuery.rows[0]?.web || ''
+    };
+    
+    // 2. Horarios
+    const horariosQuery = await pool.query('SELECT * FROM horarios ORDER BY dia_semana');
+    const excepcionesQuery = await pool.query('SELECT * FROM excepciones_horario WHERE fecha >= CURRENT_DATE');
+    espejo.horarios = {
+      regular: horariosQuery.rows,
+      excepciones: excepcionesQuery.rows
+    };
+    
+    // 3. Mesas y su estado actual
+    const mesasQuery = await pool.query(`
+      SELECT m.*, 
+        CASE 
+          WHEN r.id IS NOT NULL THEN 'ocupada'
+          ELSE 'libre'
+        END as estado
+      FROM mesas m
+      LEFT JOIN reservas r ON m.id = r.mesa_id 
+        AND r.fecha = CURRENT_DATE 
+        AND r.estado IN ('confirmada', 'pendiente')
+        AND r.hora <= CURRENT_TIME + INTERVAL '30 minutes'
+        AND r.hora >= CURRENT_TIME - INTERVAL '90 minutes'
+      WHERE m.activa = true
+      ORDER BY m.numero_mesa
+    `);
+    espejo.mesas = mesasQuery.rows;
+    
+    // 4. Reservas
+    const reservasQuery = await pool.query(`
+      SELECT r.*, c.nombre, c.telefono, c.email 
+      FROM reservas r
+      JOIN clientes c ON r.cliente_id = c.id
+      WHERE r.fecha >= CURRENT_DATE - INTERVAL '1 day'
+        AND r.fecha <= CURRENT_DATE + INTERVAL '7 days'
+      ORDER BY r.fecha, r.hora
+    `);
+    espejo.reservas = reservasQuery.rows;
+    
+    // 5. Menú completo
+    const categoriasQuery = await pool.query('SELECT * FROM categorias_menu WHERE visible = true ORDER BY orden');
+    const platosQuery = await pool.query(`
+      SELECT p.*, array_agg(a.nombre) as alergenos
+      FROM platos p
+      LEFT JOIN platos_alergenos pa ON p.id = pa.plato_id
+      LEFT JOIN alergenos a ON pa.alergeno_id = a.id
+      GROUP BY p.id
+      ORDER BY p.categoria_id, p.nombre
+    `);
+    
+    // Estructurar menú por categorías
+    espejo.menu = {
+      categorias: categoriasQuery.rows.map(categoria => ({
+        ...categoria,
+        platos: platosQuery.rows
+          .filter(plato => plato.categoria_id === categoria.id)
+          .map(plato => ({
+            ...plato,
+            alergenos: plato.alergenos?.filter(a => a !== null) || []
+          }))
+      }))
+    };
+    
+    // 6. Políticas
+    const politicasQuery = await pool.query('SELECT * FROM politicas LIMIT 1');
+    espejo.politicas = politicasQuery.rows[0] || {};
+    
+    // 7. Metadatos
+    espejo.ultima_actualizacion = new Date().toISOString();
+    espejo.edad_segundos = 0;
+    
+    // Guardar en archivo espejo.json
+    const archivoPath = path.join(__dirname, 'espejo.json');
+    await fs.writeFile(archivoPath, JSON.stringify(espejo, null, 2));
+    
+    const tiempoTotal = Date.now() - inicio;
+    console.log(`✅ Archivo espejo.json generado exitosamente en ${tiempoTotal}ms`);
+    
+    return {
+      exito: true,
+      archivo: archivoPath,
+      tiempo_ms: tiempoTotal,
+      tamaño_kb: Math.round((JSON.stringify(espejo).length / 1024) * 100) / 100
+    };
+    
+  } catch (error) {
+    console.error('❌ Error generando espejo.json:', error);
+    return {
+      exito: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Lee el archivo espejo.json y valida su edad
+ * @returns {Object} Datos del espejo con metadatos de validación
+ */
+async function leerEspejoDesdeArchivo() {
+  try {
+    const archivoPath = path.join(__dirname, 'espejo.json');
+    
+    // Verificar si el archivo existe
+    try {
+      await fs.access(archivoPath);
+    } catch (error) {
+      console.log('⚠️  Archivo espejo.json no encontrado, generando nuevo...');
+      await generarEspejo();
+    }
+    
+    // Leer el archivo
+    const contenido = await fs.readFile(archivoPath, 'utf8');
+    const datos = JSON.parse(contenido);
+    
+    // Calcular edad en segundos
+    const ahora = new Date();
+    const ultimaActualizacion = new Date(datos.ultima_actualizacion);
+    const edadSegundos = Math.floor((ahora - ultimaActualizacion) / 1000);
+    
+    // Actualizar edad_segundos en los datos
+    datos.edad_segundos = edadSegundos;
+    
+    return {
+      exito: true,
+      datos,
+      edad_segundos: edadSegundos,
+      archivo_valido: edadSegundos < 30
+    };
+    
+  } catch (error) {
+    console.error('❌ Error leyendo espejo.json:', error);
+    return {
+      exito: false,
+      error: error.message,
+      edad_segundos: 999999,
+      archivo_valido: false
+    };
+  }
+}
+
 // Actualizar edad del espejo cada segundo
 setInterval(() => {
   if (archivoEspejo.ultima_actualizacion) {
@@ -202,6 +365,20 @@ setInterval(() => {
 
 // Actualizar Archivo Espejo cada 15 segundos
 cron.schedule('*/15 * * * * *', actualizarArchivoEspejo);
+
+// ============================================
+// SINCRONIZACIÓN CONTINUA CON ESPEJO.JSON
+// ============================================
+
+// Opcional: Regenerar espejo.json cada 15 segundos para sincronización continua
+// Esto asegura que el archivo espejo.json siempre esté actualizado sin depender del Dashboard
+cron.schedule('*/15 * * * * *', async () => {
+  try {
+    await generarEspejo();
+  } catch (error) {
+    console.error('❌ Error en sincronización automática de espejo.json:', error);
+  }
+});
 
 // ============================================
 // MIDDLEWARES DE VALIDACIÓN
@@ -259,24 +436,120 @@ app.get('/api/resumen', (req, res) => {
 // ENDPOINTS PARA EL GPT PERSONALIZADO
 // ============================================
 
-// ENDPOINT PRINCIPAL: Obtener Archivo Espejo completo
-app.get('/api/espejo', verificarFrescura, (req, res) => {
-  // Forzar cabeceras anti-cache y status 200 OK
-  res.set({
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-    'Pragma': 'no-cache',
-    'Expires': '0'
-  });
-  
-  res.removeHeader('ETag');
-  res.removeHeader('Last-Modified');
-  
-  res.status(200).json({
-    exito: true,
-    datos: archivoEspejo,
-    mensaje: "Datos actualizados del restaurante"
-  });
+// ENDPOINT PRINCIPAL: Obtener Archivo Espejo completo desde espejo.json
+app.get('/api/espejo', async (req, res) => {
+  try {
+    // Forzar cabeceras anti-cache y status 200 OK
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    
+    res.removeHeader('ETag');
+    res.removeHeader('Last-Modified');
+    
+    // Leer datos desde espejo.json
+    const resultado = await leerEspejoDesdeArchivo();
+    
+    if (!resultado.exito) {
+      return res.status(503).json({
+        exito: false,
+        mensaje: "Error al acceder a los datos del restaurante",
+        codigo: "ARCHIVO_ESPEJO_ERROR"
+      });
+    }
+    
+    // Validar edad de los datos
+    if (!resultado.archivo_valido) {
+      console.log(`⚠️  Datos antiguos detectados (${resultado.edad_segundos}s), regenerando...`);
+      
+      // Intentar regenerar
+      const regeneracion = await generarEspejo();
+      if (regeneracion.exito) {
+        // Releer los datos actualizados
+        const nuevoResultado = await leerEspejoDesdeArchivo();
+        if (nuevoResultado.exito) {
+          return res.status(200).json({
+            exito: true,
+            datos: nuevoResultado.datos,
+            mensaje: "Datos actualizados del restaurante (regenerados automáticamente)"
+          });
+        }
+      }
+      
+      // Si falla la regeneración, devolver datos antiguos con advertencia
+      return res.status(200).json({
+        exito: true,
+        datos: resultado.datos,
+        mensaje: "Datos del restaurante (pueden estar desactualizados)",
+        advertencia: `Datos con ${resultado.edad_segundos} segundos de antigüedad`
+      });
+    }
+    
+    // Datos válidos y frescos
+    res.status(200).json({
+      exito: true,
+      datos: resultado.datos,
+      mensaje: "Datos actualizados del restaurante"
+    });
+    
+  } catch (error) {
+    console.error('❌ Error en /api/espejo:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error interno del servidor",
+      codigo: "ERROR_INTERNO"
+    });
+  }
+});
+
+// ENDPOINT PARA GENERAR ESPEJO MANUALMENTE
+app.get('/api/generar-espejo', async (req, res) => {
+  try {
+    console.log('📞 Solicitud manual para generar espejo.json');
+    
+    // Forzar cabeceras anti-cache
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    
+    res.removeHeader('ETag');
+    res.removeHeader('Last-Modified');
+    
+    // Llamar a la función de generación
+    const resultado = await generarEspejo();
+    
+    if (resultado.exito) {
+      res.status(200).json({
+        exito: true,
+        mensaje: "Archivo espejo.json generado correctamente",
+        detalles: {
+          archivo: 'espejo.json',
+          tiempo_ms: resultado.tiempo_ms,
+          tamaño_kb: resultado.tamaño_kb
+        }
+      });
+    } else {
+      res.status(500).json({
+        exito: false,
+        mensaje: "Error al generar el archivo espejo.json",
+        error: resultado.error
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error en endpoint /api/generar-espejo:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error interno del servidor",
+      error: error.message
+    });
+  }
 });
 
 // ============================================
@@ -862,6 +1135,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     
     // Actualizar Archivo Espejo inmediatamente
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -974,6 +1248,7 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
       
       await client.query('COMMIT');
       await actualizarArchivoEspejo();
+      await generarEspejo();
       
       res.json({
         exito: true,
@@ -1069,6 +1344,7 @@ app.delete('/api/cancelar-reserva', verificarFrescura, async (req, res) => {
     }
     
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -1413,6 +1689,7 @@ app.post('/api/admin/mesas', async (req, res) => {
     
     await registrarCambio('crear_mesa', resultado.rows[0].id, null, resultado.rows[0], 'admin');
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -1457,6 +1734,7 @@ app.put('/api/admin/mesas/:id', async (req, res) => {
     
     await registrarCambio('actualizar_mesa', id, mesaAnterior.rows[0], resultado.rows[0], 'admin');
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -1499,6 +1777,7 @@ app.delete('/api/admin/mesas/:id', async (req, res) => {
     
     await registrarCambio('eliminar_mesa', id, mesaAnterior.rows[0], null, 'admin');
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -1547,6 +1826,7 @@ app.post('/api/admin/menu/categoria', async (req, res) => {
     );
     
     await actualizarArchivoEspejo();
+    await generarEspejo();
     res.json({ exito: true, categoria: resultado.rows[0] });
   } catch (error) {
     res.status(500).json({ exito: false, mensaje: "Error al crear categoría" });
@@ -1618,6 +1898,7 @@ app.post('/api/admin/menu/plato', async (req, res) => {
     
     await client.query('COMMIT');
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({ 
       exito: true, 
@@ -1722,6 +2003,7 @@ app.put('/api/admin/menu/plato/:id', async (req, res) => {
     
     await client.query('COMMIT');
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({ 
       exito: true, 
@@ -1764,6 +2046,7 @@ app.delete('/api/admin/menu/plato/:id', async (req, res) => {
     }
     
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -1792,6 +2075,7 @@ app.put('/api/admin/menu/plato/:id/disponibilidad', async (req, res) => {
     }
     
     await actualizarArchivoEspejo();
+    await generarEspejo();
     res.json({ 
       exito: true, 
       plato: resultado.rows[0],
@@ -1875,6 +2159,7 @@ app.put('/api/admin/politicas', async (req, res) => {
     }
     
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -2013,6 +2298,7 @@ app.get('/api/admin/restaurante', async (req, res) => {
       `);
       
       await actualizarArchivoEspejo();
+      await generarEspejo();
       
       return res.json({
         exito: true,
@@ -2110,6 +2396,7 @@ app.put('/api/admin/restaurante', async (req, res) => {
     
     // Actualizar archivo espejo inmediatamente
     await actualizarArchivoEspejo();
+    await generarEspejo();
     
     res.json({
       exito: true,
@@ -2225,6 +2512,7 @@ app.listen(PORT, async () => {
   
   await inicializarDB();
   await actualizarArchivoEspejo();
+  await generarEspejo();
   
   console.log('✅ Sistema listo para recibir peticiones del GPT\n');
 });
