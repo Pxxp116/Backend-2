@@ -1025,12 +1025,33 @@ app.get('/api/admin/mesas', async (req, res) => {
 app.post('/api/admin/mesas', async (req, res) => {
   const { numero_mesa, capacidad, zona, ubicacion, unible } = req.body;
   
+  // Validación de entrada
+  if (!numero_mesa || !capacidad) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Número de mesa y capacidad son obligatorios"
+    });
+  }
+  
   try {
+    // Verificar que no exista una mesa con el mismo número
+    const mesaExistente = await pool.query(
+      'SELECT id FROM mesas WHERE numero_mesa = $1',
+      [numero_mesa]
+    );
+    
+    if (mesaExistente.rows.length > 0) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: `Ya existe una mesa con el número ${numero_mesa}`
+      });
+    }
+    
     const resultado = await pool.query(
       `INSERT INTO mesas (numero_mesa, capacidad, zona, ubicacion, unible, activa) 
        VALUES ($1, $2, $3, $4, $5, true) 
        RETURNING *`,
-      [numero_mesa, capacidad, zona, ubicacion, unible]
+      [numero_mesa, capacidad, zona || null, ubicacion || null, unible || false]
     );
     
     await registrarCambio('crear_mesa', resultado.rows[0].id, null, resultado.rows[0], 'admin');
@@ -1038,34 +1059,97 @@ app.post('/api/admin/mesas', async (req, res) => {
     
     res.json({
       exito: true,
-      mesa: resultado.rows[0]
+      mesa: resultado.rows[0],
+      mensaje: `Mesa ${numero_mesa} creada correctamente`
     });
   } catch (error) {
-    res.status(500).json({ exito: false, mensaje: "Error al crear mesa" });
+    console.error('Error creando mesa:', error);
+    if (error.code === '23505') { // Unique violation
+      res.status(400).json({ 
+        exito: false, 
+        mensaje: `Ya existe una mesa con el número ${numero_mesa}` 
+      });
+    } else {
+      res.status(500).json({ 
+        exito: false, 
+        mensaje: "Error al crear mesa" 
+      });
+    }
   }
 });
 
 app.put('/api/admin/mesas/:id', async (req, res) => {
   const { id } = req.params;
-  const { capacidad, zona, ubicacion, activa } = req.body;
+  const { numero_mesa, capacidad, zona, ubicacion, activa } = req.body;
   
   try {
+    // Obtener datos anteriores para el historial
+    const mesaAnterior = await pool.query('SELECT * FROM mesas WHERE id = $1', [id]);
+    
     const resultado = await pool.query(
       `UPDATE mesas 
-       SET capacidad = $1, zona = $2, ubicacion = $3, activa = $4
-       WHERE id = $5
+       SET numero_mesa = COALESCE($1, numero_mesa), capacidad = COALESCE($2, capacidad), zona = $3, ubicacion = $4, activa = COALESCE($5, activa)
+       WHERE id = $6
        RETURNING *`,
-      [capacidad, zona, ubicacion, activa, id]
+      [numero_mesa, capacidad, zona, ubicacion, activa, id]
     );
     
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({ exito: false, mensaje: "Mesa no encontrada" });
+    }
+    
+    await registrarCambio('actualizar_mesa', id, mesaAnterior.rows[0], resultado.rows[0], 'admin');
     await actualizarArchivoEspejo();
     
     res.json({
       exito: true,
-      mesa: resultado.rows[0]
+      mesa: resultado.rows[0],
+      mensaje: "Mesa actualizada correctamente"
     });
   } catch (error) {
+    console.error('Error actualizando mesa:', error);
     res.status(500).json({ exito: false, mensaje: "Error al actualizar mesa" });
+  }
+});
+
+app.delete('/api/admin/mesas/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    // Verificar si la mesa tiene reservas futuras
+    const reservasFuturas = await pool.query(
+      `SELECT COUNT(*) as total FROM reservas 
+       WHERE mesa_id = $1 AND fecha >= CURRENT_DATE AND estado IN ('confirmada', 'pendiente')`,
+      [id]
+    );
+    
+    if (parseInt(reservasFuturas.rows[0].total) > 0) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: `No se puede eliminar la mesa. Tiene ${reservasFuturas.rows[0].total} reservas futuras`
+      });
+    }
+    
+    // Obtener datos de la mesa antes de eliminar
+    const mesaAnterior = await pool.query('SELECT * FROM mesas WHERE id = $1', [id]);
+    
+    if (mesaAnterior.rows.length === 0) {
+      return res.status(404).json({ exito: false, mensaje: "Mesa no encontrada" });
+    }
+    
+    // Eliminar la mesa
+    await pool.query('DELETE FROM mesas WHERE id = $1', [id]);
+    
+    await registrarCambio('eliminar_mesa', id, mesaAnterior.rows[0], null, 'admin');
+    await actualizarArchivoEspejo();
+    
+    res.json({
+      exito: true,
+      mensaje: `Mesa ${mesaAnterior.rows[0].numero_mesa} eliminada correctamente`
+    });
+  } catch (error) {
+    console.error('Error eliminando mesa:', error);
+    res.status(500).json({ exito: false, mensaje: "Error al eliminar mesa" });
   }
 });
 
