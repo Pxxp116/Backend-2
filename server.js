@@ -209,6 +209,26 @@ async function registrarCambio(tipo, entidad_id, datos_antes, datos_despues, usu
   }
 }
 
+// Endpoint de prueba super simple para el GPT
+app.get('/api/ping', (req, res) => {
+  res.json({
+    ok: true,
+    mensaje: "Hola desde GastroBot",
+    hora: new Date().toISOString()
+  });
+});
+
+// Endpoint de resumen (versión simplificada del espejo)
+app.get('/api/resumen', (req, res) => {
+  res.json({
+    exito: true,
+    restaurante: archivoEspejo.restaurante?.nombre || "Mi Restaurante",
+    mesas_disponibles: archivoEspejo.mesas?.filter(m => m.activa && m.estado === 'libre').length || 0,
+    reservas_hoy: archivoEspejo.reservas?.filter(r => r.fecha === new Date().toISOString().split('T')[0]).length || 0,
+    edad_segundos: archivoEspejo.edad_segundos || 0
+  });
+});
+
 // ============================================
 // ENDPOINTS PARA EL GPT PERSONALIZADO
 // ============================================
