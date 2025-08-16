@@ -29,6 +29,32 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// ===== CONFIGURACIÓN ANTI-CACHE PARA GPT =====
+// Desactivar ETag globalmente
+app.set('etag', false);
+
+// Middleware global para eliminar caches y validación condicional
+app.use((req, res, next) => {
+  // Eliminar headers de validación condicional del request
+  delete req.headers['if-none-match'];
+  delete req.headers['if-modified-since'];
+  
+  // Establecer headers anti-cache en todas las respuestas
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'Surrogate-Control': 'no-store',
+    'CDN-Cache-Control': 'no-store'
+  });
+  
+  // Eliminar headers de validación que Express podría añadir
+  res.removeHeader('ETag');
+  res.removeHeader('Last-Modified');
+  
+  next();
+});
+
 // Configuración de base de datos PostgreSQL
 // Detectar si estamos en Railway o local
 const isProduction = process.env.NODE_ENV === 'production' || process.env.DATABASE_URL;
@@ -235,7 +261,18 @@ app.get('/api/resumen', (req, res) => {
 
 // ENDPOINT PRINCIPAL: Obtener Archivo Espejo completo
 app.get('/api/espejo', verificarFrescura, (req, res) => {
-  res.json({
+  // Forzar cabeceras anti-cache y status 200 OK
+  res.set({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
+  res.removeHeader('ETag');
+  res.removeHeader('Last-Modified');
+  
+  res.status(200).json({
     exito: true,
     datos: archivoEspejo,
     mensaje: "Datos actualizados del restaurante"
@@ -503,9 +540,24 @@ function normalizarDatosParaGPT(datos) {
 // ENDPOINT PÚBLICO PARA GPT: Datos normalizados y limpios
 app.get('/api/espejo-gpt', (req, res) => {
   try {
+    // Forzar cabeceras anti-cache específicas para este endpoint
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Surrogate-Control': 'no-store',
+      'CDN-Cache-Control': 'no-store'
+    });
+    
+    // Eliminar cualquier header de validación que pudiera existir
+    res.removeHeader('ETag');
+    res.removeHeader('Last-Modified');
+    
     const datosNormalizados = normalizarDatosParaGPT(archivoEspejo);
     
-    res.json({
+    // Forzar status 200 OK explícitamente
+    res.status(200).json({
       exito: true,
       datos: datosNormalizados,
       mensaje: "OK"
@@ -513,6 +565,13 @@ app.get('/api/espejo-gpt', (req, res) => {
     
   } catch (error) {
     console.error('Error en /api/espejo-gpt:', error);
+    
+    // También en error, forzar headers anti-cache
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    
     res.status(500).json({
       exito: false,
       mensaje: "Error interno del servidor"
