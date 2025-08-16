@@ -309,9 +309,9 @@ function normalizarDatosParaGPT(datos) {
         .filter(h => h && h.dia_semana !== null && h.dia_semana !== undefined)
         .map(h => ({
           dia_semana: h.dia_semana,
-          abierto: Boolean(h.abierto),
-          ...(h.hora_apertura && { hora_apertura: h.hora_apertura }),
-          ...(h.hora_cierre && { hora_cierre: h.hora_cierre })
+          abierto: Boolean(!h.cerrado),
+          ...(h.apertura && { hora_apertura: h.apertura }),
+          ...(h.cierre && { hora_cierre: h.cierre })
         }));
     }
     
@@ -342,6 +342,12 @@ function normalizarDatosParaGPT(datos) {
 
         // Normalizar ubicación: solo 'sala' o 'terraza'
         let ubicacion = 'sala';
+        if (m.zona) {
+          const zona = m.zona.toLowerCase().trim();
+          if (zona.includes('terraza') || zona.includes('exterior')) {
+            ubicacion = 'terraza';
+          }
+        }
         if (m.ubicacion) {
           const ubi = m.ubicacion.toLowerCase().trim();
           if (ubi.includes('terraza') || ubi.includes('exterior') || ubi.includes('patio')) {
@@ -476,8 +482,8 @@ function normalizarDatosParaGPT(datos) {
     if (pol.anticipo_requerido !== null && pol.anticipo_requerido !== undefined) {
       resultado.politicas.anticipo_requerido = Boolean(pol.anticipo_requerido);
     }
-    if (pol.ninos_permitidos !== null && pol.ninos_permitidos !== undefined) {
-      resultado.politicas.ninos_permitidos = Boolean(pol.ninos_permitidos);
+    if (pol.niños_permitidos !== null && pol.niños_permitidos !== undefined) {
+      resultado.politicas.ninos_permitidos = Boolean(pol.niños_permitidos);
     }
     if (pol.mascotas_permitidas !== null && pol.mascotas_permitidas !== undefined) {
       resultado.politicas.mascotas_permitidas = Boolean(pol.mascotas_permitidas);
