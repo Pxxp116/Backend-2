@@ -50,6 +50,20 @@ async function initDatabase() {
         actualizado_en TIMESTAMP DEFAULT NOW()
       );
 
+      ALTER TABLE restaurante
+        ADD COLUMN IF NOT EXISTS tipo_cocina VARCHAR(100) DEFAULT 'Mediterránea',
+        ADD COLUMN IF NOT EXISTS facebook VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS instagram VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS twitter VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS tripadvisor VARCHAR(200);
+      );
+
+      UPDATE restaurante 
+      SET tipo_cocina = COALESCE(tipo_cocina, 'Mediterránea')
+      WHERE tipo_cocina IS NULL;
+
+   
+
       -- ==============================================
       -- TABLA: MESAS
       -- ==============================================

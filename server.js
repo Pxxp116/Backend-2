@@ -1324,6 +1324,147 @@ app.get('/api/admin/estadisticas', async (req, res) => {
   }
 });
 
+// Añadir estos endpoints al archivo server.js después de los endpoints existentes
+
+// ============================================
+// ENDPOINTS - INFORMACIÓN DEL RESTAURANTE
+// ============================================
+
+// Obtener información del restaurante
+app.get('/api/admin/restaurante', async (req, res) => {
+  try {
+    const resultado = await pool.query('SELECT * FROM restaurante LIMIT 1');
+    
+    if (resultado.rows.length === 0) {
+      // Si no existe, crear registro por defecto
+      const nuevoRestaurante = await pool.query(`
+        INSERT INTO restaurante (
+          nombre, tipo_cocina, direccion, telefono, email, web, descripcion
+        ) VALUES (
+          'Mi Restaurante', 
+          'Mediterránea',
+          'Calle Principal 123, Barcelona', 
+          '+34 900 123 456',
+          'info@mirestaurante.com',
+          'www.mirestaurante.com',
+          'Cocina mediterránea moderna'
+        ) RETURNING *
+      `);
+      
+      await actualizarArchivoEspejo();
+      
+      return res.json({
+        exito: true,
+        restaurante: nuevoRestaurante.rows[0]
+      });
+    }
+    
+    res.json({
+      exito: true,
+      restaurante: resultado.rows[0]
+    });
+  } catch (error) {
+    console.error('Error obteniendo información del restaurante:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al obtener información del restaurante"
+    });
+  }
+});
+
+// Actualizar información del restaurante
+app.put('/api/admin/restaurante', async (req, res) => {
+  const {
+    nombre,
+    tipo_cocina,
+    direccion,
+    telefono,
+    email,
+    web,
+    descripcion,
+    facebook,
+    instagram,
+    twitter,
+    tripadvisor
+  } = req.body;
+  
+  try {
+    // Verificar si existe un registro
+    const existe = await pool.query('SELECT id FROM restaurante LIMIT 1');
+    
+    let resultado;
+    
+    if (existe.rows.length > 0) {
+      // Actualizar registro existente
+      resultado = await pool.query(`
+        UPDATE restaurante 
+        SET 
+          nombre = COALESCE($1, nombre),
+          tipo_cocina = COALESCE($2, tipo_cocina),
+          direccion = COALESCE($3, direccion),
+          telefono = COALESCE($4, telefono),
+          email = COALESCE($5, email),
+          web = COALESCE($6, web),
+          descripcion = COALESCE($7, descripcion),
+          facebook = COALESCE($8, facebook),
+          instagram = COALESCE($9, instagram),
+          twitter = COALESCE($10, twitter),
+          tripadvisor = COALESCE($11, tripadvisor),
+          actualizado_en = NOW()
+        WHERE id = $12
+        RETURNING *
+      `, [
+        nombre, tipo_cocina, direccion, telefono, email, web, 
+        descripcion, facebook, instagram, twitter, tripadvisor,
+        existe.rows[0].id
+      ]);
+    } else {
+      // Crear nuevo registro
+      resultado = await pool.query(`
+        INSERT INTO restaurante (
+          nombre, tipo_cocina, direccion, telefono, email, web, 
+          descripcion, facebook, instagram, twitter, tripadvisor
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING *
+      `, [
+        nombre || 'Mi Restaurante',
+        tipo_cocina || 'Mediterránea',
+        direccion || 'Dirección no especificada',
+        telefono || '+34 900 000 000',
+        email || 'info@restaurante.com',
+        web || 'www.restaurante.com',
+        descripcion || 'Descripción del restaurante',
+        facebook, instagram, twitter, tripadvisor
+      ]);
+    }
+    
+    // Registrar cambio en historial
+    await registrarCambio(
+      'actualizar_restaurante',
+      resultado.rows[0].id,
+      existe.rows[0] || null,
+      resultado.rows[0],
+      'admin'
+    );
+    
+    // Actualizar archivo espejo inmediatamente
+    await actualizarArchivoEspejo();
+    
+    res.json({
+      exito: true,
+      restaurante: resultado.rows[0],
+      mensaje: "Información del restaurante actualizada correctamente"
+    });
+    
+  } catch (error) {
+    console.error('Error actualizando información del restaurante:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al actualizar información del restaurante"
+    });
+  }
+});
+
 // ============================================
 // INICIALIZACIÓN
 // ============================================
