@@ -16,16 +16,40 @@ const PORT = process.env.PORT || 3002;
 
 // Middlewares
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001', 
-    'https://dashboard-2-production.up.railway.app',
-    // Añade aquí la URL de tu dashboard si es diferente
-    true // Permite cualquier origen temporalmente para debug
-  ],
+  origin: function (origin, callback) {
+    // Permitir peticiones sin origen (como Postman o ChatGPT)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001', 
+      'https://dashboard-2-production.up.railway.app',
+      'https://chat.openai.com',
+      'https://chatgpt.com'
+    ];
+    
+    // Permitir cualquier origen de OpenAI/ChatGPT
+    if (origin.includes('openai.com') || origin.includes('chatgpt.com')) {
+      return callback(null, true);
+    }
+    
+    // Permitir orígenes específicos
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Para desarrollo, permitir cualquier origen
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    // En producción, permitir todo temporalmente para ChatGPT
+    return callback(null, true);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'openai-conversation-id', 'openai-ephemeral-user-id'],
+  exposedHeaders: ['Content-Type']
 }));
 app.use(express.json());
 
