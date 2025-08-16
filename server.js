@@ -503,13 +503,7 @@ function normalizarDatosParaGPT(datos) {
 // ENDPOINT PÚBLICO PARA GPT: Datos normalizados y limpios
 app.get('/api/espejo-gpt', (req, res) => {
   try {
-    console.log('📍 Iniciando /api/espejo-gpt');
-    console.log('📍 archivoEspejo exists:', !!archivoEspejo);
-    console.log('📍 archivoEspejo keys:', archivoEspejo ? Object.keys(archivoEspejo) : 'null');
-    
     const datosNormalizados = normalizarDatosParaGPT(archivoEspejo);
-    
-    console.log('📍 Normalización completada, keys:', Object.keys(datosNormalizados));
     
     res.json({
       exito: true,
@@ -518,12 +512,10 @@ app.get('/api/espejo-gpt', (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error en /api/espejo-gpt:', error.message);
-    console.error('❌ Stack trace:', error.stack);
+    console.error('Error en /api/espejo-gpt:', error);
     res.status(500).json({
       exito: false,
-      mensaje: "Error interno del servidor",
-      debug: error.message
+      mensaje: "Error interno del servidor"
     });
   }
 });
