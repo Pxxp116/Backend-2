@@ -242,6 +242,274 @@ app.get('/api/espejo', verificarFrescura, (req, res) => {
   });
 });
 
+// ============================================
+// ENDPOINT PÚBLICO PARA GPT - DATOS NORMALIZADOS
+// ============================================
+
+/**
+ * Normaliza y limpia los datos del archivo espejo para consumo de GPT
+ * Elimina nulls, normaliza formatos y unifica valores
+ */
+function normalizarDatosParaGPT(datos) {
+  if (!datos) return {};
+
+  const resultado = {};
+
+  // Normalizar restaurante
+  if (datos.restaurante) {
+    const resto = datos.restaurante;
+    resultado.restaurante = {};
+    
+    if (resto.nombre && resto.nombre.trim()) {
+      resultado.restaurante.nombre = resto.nombre.trim();
+    }
+    if (resto.telefono && resto.telefono.trim()) {
+      resultado.restaurante.telefono = resto.telefono.trim();
+    }
+    if (resto.email && resto.email.trim()) {
+      resultado.restaurante.email = resto.email.trim();
+    }
+    if (resto.direccion && resto.direccion.trim()) {
+      resultado.restaurante.direccion = resto.direccion.trim();
+    }
+    
+    // Normalizar sitio web
+    if (resto.web && resto.web.trim()) {
+      let web = resto.web.trim();
+      if (!web.startsWith('http://') && !web.startsWith('https://')) {
+        web = 'https://' + web;
+      }
+      if (web !== 'https://' && web !== 'http://') {
+        resultado.restaurante.sitio_web = web;
+      }
+    }
+    
+    // Normalizar redes sociales (solo si tienen valor)
+    const redes = {};
+    if (resto.facebook && resto.facebook.trim()) {
+      redes.facebook = resto.facebook.trim();
+    }
+    if (resto.instagram && resto.instagram.trim()) {
+      redes.instagram = resto.instagram.trim();
+    }
+    if (resto.twitter && resto.twitter.trim()) {
+      redes.twitter = resto.twitter.trim();
+    }
+    if (Object.keys(redes).length > 0) {
+      resultado.restaurante.redes = redes;
+    }
+  }
+
+  // Normalizar horarios
+  if (datos.horarios) {
+    resultado.horarios = {};
+    
+    if (datos.horarios.regular && Array.isArray(datos.horarios.regular)) {
+      resultado.horarios.regular = datos.horarios.regular
+        .filter(h => h && h.dia_semana !== null && h.dia_semana !== undefined)
+        .map(h => ({
+          dia_semana: h.dia_semana,
+          abierto: Boolean(h.abierto),
+          ...(h.hora_apertura && { hora_apertura: h.hora_apertura }),
+          ...(h.hora_cierre && { hora_cierre: h.hora_cierre })
+        }));
+    }
+    
+    if (datos.horarios.excepciones && Array.isArray(datos.horarios.excepciones)) {
+      resultado.horarios.excepciones = datos.horarios.excepciones
+        .filter(e => e && e.fecha)
+        .map(e => ({
+          fecha: e.fecha,
+          abierto: Boolean(e.abierto),
+          ...(e.hora_apertura && { hora_apertura: e.hora_apertura }),
+          ...(e.hora_cierre && { hora_cierre: e.hora_cierre }),
+          ...(e.motivo && e.motivo.trim() && { motivo: e.motivo.trim() })
+        }));
+    }
+  }
+
+  // Normalizar mesas
+  if (datos.mesas && Array.isArray(datos.mesas)) {
+    resultado.mesas = datos.mesas
+      .filter(m => m && m.id !== null && m.id !== undefined)
+      .map(m => {
+        const mesa = {
+          id: String(m.id),
+          nombre: m.nombre || m.numero_mesa || String(m.id),
+          capacidad: parseInt(m.capacidad) || 2,
+          fumadores: Boolean(m.fumadores)
+        };
+
+        // Normalizar ubicación: solo 'sala' o 'terraza'
+        let ubicacion = 'sala';
+        if (m.ubicacion) {
+          const ubi = m.ubicacion.toLowerCase().trim();
+          if (ubi.includes('terraza') || ubi.includes('exterior') || ubi.includes('patio')) {
+            ubicacion = 'terraza';
+          }
+        }
+        mesa.ubicacion = ubicacion;
+
+        // Normalizar estado
+        mesa.estado = (m.estado || 'libre').toLowerCase().trim();
+
+        return mesa;
+      });
+  }
+
+  // Normalizar reservas
+  if (datos.reservas && Array.isArray(datos.reservas)) {
+    resultado.reservas = datos.reservas
+      .filter(r => r && r.id !== null && r.id !== undefined)
+      .map(r => {
+        const reserva = {
+          codigo: String(r.id),
+          mesa_id: String(r.mesa_id),
+          personas: parseInt(r.personas) || 1,
+          nombre: r.nombre || ''
+        };
+
+        // Normalizar fecha
+        if (r.fecha) {
+          reserva.fecha = r.fecha.split('T')[0]; // YYYY-MM-DD
+        }
+
+        // Normalizar hora (solo si es válida)
+        if (r.hora && r.hora.trim() && r.hora !== '00:00:00') {
+          reserva.hora = r.hora;
+        }
+
+        // Campos opcionales
+        if (r.telefono && r.telefono.trim()) {
+          reserva.telefono = r.telefono.trim();
+        }
+        if (r.email && r.email.trim()) {
+          reserva.email = r.email.trim();
+        }
+        if (r.notas && r.notas.trim()) {
+          reserva.notas = r.notas.trim();
+        }
+
+        // Normalizar estado: confirmada → activa
+        let estado = (r.estado || 'activa').toLowerCase().trim();
+        if (estado === 'confirmada') {
+          estado = 'activa';
+        }
+        reserva.estado = estado;
+
+        return reserva;
+      });
+  }
+
+  // Normalizar menú
+  if (datos.menu && datos.menu.categorias && Array.isArray(datos.menu.categorias)) {
+    resultado.menu = {
+      categorias: datos.menu.categorias
+        .filter(c => c && c.nombre)
+        .map(c => {
+          const categoria = {
+            id: c.id,
+            nombre: c.nombre.trim(),
+            ...(c.descripcion && c.descripcion.trim() && { descripcion: c.descripcion.trim() })
+          };
+
+          if (c.platos && Array.isArray(c.platos)) {
+            categoria.platos = c.platos
+              .filter(p => p && p.nombre)
+              .map(p => {
+                const plato = {
+                  id: p.id,
+                  nombre: p.nombre.trim(),
+                  precio: parseFloat(p.precio) || 0,
+                  disponible: Boolean(p.disponible !== false)
+                };
+
+                if (p.descripcion && p.descripcion.trim()) {
+                  plato.descripcion = p.descripcion.trim();
+                }
+
+                // Características booleanas
+                if (p.vegetariano) plato.vegetariano = true;
+                if (p.vegano) plato.vegano = true;
+                if (p.sin_gluten) plato.sin_gluten = true;
+                if (p.picante) plato.picante = true;
+                if (p.recomendado) plato.recomendado = true;
+
+                // Alérgenos: limpiar nulls
+                if (p.alergenos && Array.isArray(p.alergenos)) {
+                  const alergenosLimpios = p.alergenos.filter(a => a && a.trim && a.trim() !== '');
+                  if (alergenosLimpios.length > 0) {
+                    plato.alergenos = alergenosLimpios;
+                  }
+                }
+
+                // URL de imagen (solo si es válida)
+                if (p.imagen_url && p.imagen_url.trim() && 
+                    !p.imagen_url.startsWith('blob:') && 
+                    p.imagen_url !== '') {
+                  plato.imagen_url = p.imagen_url.trim();
+                }
+
+                return plato;
+              });
+          }
+
+          return categoria;
+        })
+    };
+  }
+
+  // Normalizar políticas
+  if (datos.politicas) {
+    const pol = datos.politicas;
+    resultado.politicas = {};
+
+    if (pol.cancelacion_horas && !isNaN(pol.cancelacion_horas)) {
+      resultado.politicas.antelacion_cancelacion_min = parseInt(pol.cancelacion_horas) * 60;
+    }
+    if (pol.tiempo_mesa_minutos && !isNaN(pol.tiempo_mesa_minutos)) {
+      resultado.politicas.duracion_estandar_min = parseInt(pol.tiempo_mesa_minutos);
+    }
+    if (pol.fumadores_terraza !== null && pol.fumadores_terraza !== undefined) {
+      resultado.politicas.fumadores_terraza = Boolean(pol.fumadores_terraza);
+    }
+    if (pol.anticipo_requerido !== null && pol.anticipo_requerido !== undefined) {
+      resultado.politicas.anticipo_requerido = Boolean(pol.anticipo_requerido);
+    }
+    if (pol.ninos_permitidos !== null && pol.ninos_permitidos !== undefined) {
+      resultado.politicas.ninos_permitidos = Boolean(pol.ninos_permitidos);
+    }
+    if (pol.mascotas_permitidas !== null && pol.mascotas_permitidas !== undefined) {
+      resultado.politicas.mascotas_permitidas = Boolean(pol.mascotas_permitidas);
+    }
+  }
+
+  // Edad en segundos
+  resultado.edad_segundos = datos.edad_segundos || 0;
+
+  return resultado;
+}
+
+// ENDPOINT PÚBLICO PARA GPT: Datos normalizados y limpios
+app.get('/api/espejo-gpt', (req, res) => {
+  try {
+    const datosNormalizados = normalizarDatosParaGPT(archivoEspejo);
+    
+    res.json({
+      exito: true,
+      datos: datosNormalizados,
+      mensaje: "OK"
+    });
+    
+  } catch (error) {
+    console.error('Error en /api/espejo-gpt:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error interno del servidor"
+    });
+  }
+});
+
 // Consultar horario específico
 app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
   const { fecha } = req.query;
