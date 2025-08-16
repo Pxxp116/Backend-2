@@ -12,7 +12,7 @@ const path = require('path');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 // Middlewares
 app.use(cors({
@@ -1198,8 +1198,9 @@ app.post('/api/admin/menu/categoria', async (req, res) => {
 
 app.post('/api/admin/menu/plato', async (req, res) => {
   const { 
-    categoria_id, nombre, descripcion, precio, 
-    vegetariano, vegano, sin_gluten, alergenos, disponible 
+    categoria_id, nombre, descripcion, precio, imagen_url,
+    vegetariano, vegano, sin_gluten, picante, recomendado,
+    alergenos, disponible 
   } = req.body;
   
   const client = await pool.connect();
@@ -1208,51 +1209,230 @@ app.post('/api/admin/menu/plato', async (req, res) => {
     
     const platoQuery = await client.query(
       `INSERT INTO platos (
-        categoria_id, nombre, descripcion, precio, 
-        vegetariano, vegano, sin_gluten, disponible
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [categoria_id, nombre, descripcion, precio, 
-       vegetariano || false, vegano || false, sin_gluten || false, disponible !== false]
+        categoria_id, nombre, descripcion, precio, imagen_url,
+        vegetariano, vegano, sin_gluten, picante, recomendado, disponible,
+        creado_en, actualizado_en
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW()) RETURNING *`,
+      [categoria_id, nombre, descripcion, precio, imagen_url,
+       vegetariano || false, vegano || false, sin_gluten || false, 
+       picante || false, recomendado || false, disponible !== false]
     );
     
     const plato = platoQuery.rows[0];
     
     // Asociar alérgenos si se proporcionan
-    if (alergenos && alergenos.length > 0) {
-      for (const alergenoId of alergenos) {
+    if (Array.isArray(alergenos) && alergenos.length > 0) {
+      for (const alergenoNombre of alergenos) {
+        // Buscar o crear alérgeno
+        let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [alergenoNombre]);
+        
+        if (alergeno.rows.length === 0) {
+          alergeno = await client.query(
+            'INSERT INTO alergenos (nombre) VALUES ($1) RETURNING id',
+            [alergenoNombre]
+          );
+        }
+        
+        // Asociar alérgeno con plato
         await client.query(
           'INSERT INTO platos_alergenos (plato_id, alergeno_id) VALUES ($1, $2)',
-          [plato.id, alergenoId]
+          [plato.id, alergeno.rows[0].id]
         );
       }
     }
     
+    await registrarCambio('crear_plato', plato.id, null, plato, 'admin');
     await client.query('COMMIT');
     await actualizarArchivoEspejo();
     
-    res.json({ exito: true, plato });
+    res.json({ 
+      exito: true, 
+      plato,
+      mensaje: `Plato "${nombre}" creado correctamente`
+    });
   } catch (error) {
     await client.query('ROLLBACK');
+    console.error('Error creando plato:', error);
     res.status(500).json({ exito: false, mensaje: "Error al crear plato" });
   } finally {
     client.release();
   }
 });
 
-app.patch('/api/admin/menu/plato/:id/disponibilidad', async (req, res) => {
+// Actualizar plato completo
+app.put('/api/admin/menu/plato/:id', async (req, res) => {
+  const { id } = req.params;
+  const { 
+    categoria_id, nombre, descripcion, precio, imagen_url,
+    vegetariano, vegano, sin_gluten, picante, recomendado, 
+    disponible, alergenos 
+  } = req.body;
+  
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // Obtener datos anteriores para el historial
+    const platoAnterior = await client.query('SELECT * FROM platos WHERE id = $1', [id]);
+    
+    if (platoAnterior.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ exito: false, mensaje: "Plato no encontrado" });
+    }
+    
+    // Actualizar plato
+    const platoActualizado = await client.query(`
+      UPDATE platos 
+      SET 
+        categoria_id = COALESCE($1, categoria_id),
+        nombre = COALESCE($2, nombre),
+        descripcion = COALESCE($3, descripcion),
+        precio = COALESCE($4, precio),
+        imagen_url = COALESCE($5, imagen_url),
+        vegetariano = COALESCE($6, vegetariano),
+        vegano = COALESCE($7, vegano),
+        sin_gluten = COALESCE($8, sin_gluten),
+        picante = COALESCE($9, picante),
+        recomendado = COALESCE($10, recomendado),
+        disponible = COALESCE($11, disponible),
+        actualizado_en = NOW()
+      WHERE id = $12
+      RETURNING *
+    `, [categoria_id, nombre, descripcion, precio, imagen_url, 
+        vegetariano, vegano, sin_gluten, picante, recomendado, disponible, id]);
+    
+    // Actualizar alérgenos si se proporcionan
+    if (alergenos !== undefined) {
+      // Eliminar alérgenos existentes
+      await client.query('DELETE FROM platos_alergenos WHERE plato_id = $1', [id]);
+      
+      // Añadir nuevos alérgenos
+      if (Array.isArray(alergenos) && alergenos.length > 0) {
+        for (const alergenoNombre of alergenos) {
+          // Buscar o crear alérgeno
+          let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [alergenoNombre]);
+          
+          if (alergeno.rows.length === 0) {
+            alergeno = await client.query(
+              'INSERT INTO alergenos (nombre) VALUES ($1) RETURNING id',
+              [alergenoNombre]
+            );
+          }
+          
+          // Asociar alérgeno con plato
+          await client.query(
+            'INSERT INTO platos_alergenos (plato_id, alergeno_id) VALUES ($1, $2)',
+            [id, alergeno.rows[0].id]
+          );
+        }
+      }
+    }
+    
+    await registrarCambio('actualizar_plato', id, platoAnterior.rows[0], platoActualizado.rows[0], 'admin');
+    await client.query('COMMIT');
+    await actualizarArchivoEspejo();
+    
+    res.json({ 
+      exito: true, 
+      plato: platoActualizado.rows[0],
+      mensaje: "Plato actualizado correctamente" 
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error actualizando plato:', error);
+    res.status(500).json({ exito: false, mensaje: "Error al actualizar plato" });
+  } finally {
+    client.release();
+  }
+});
+
+// Eliminar plato
+app.delete('/api/admin/menu/plato/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    // Obtener datos del plato antes de eliminar
+    const platoAnterior = await pool.query('SELECT * FROM platos WHERE id = $1', [id]);
+    
+    if (platoAnterior.rows.length === 0) {
+      return res.status(404).json({ exito: false, mensaje: "Plato no encontrado" });
+    }
+    
+    // Eliminar relaciones con alérgenos
+    await pool.query('DELETE FROM platos_alergenos WHERE plato_id = $1', [id]);
+    
+    // Eliminar el plato
+    await pool.query('DELETE FROM platos WHERE id = $1', [id]);
+    
+    await registrarCambio('eliminar_plato', id, platoAnterior.rows[0], null, 'admin');
+    await actualizarArchivoEspejo();
+    
+    res.json({
+      exito: true,
+      mensaje: `Plato "${platoAnterior.rows[0].nombre}" eliminado correctamente`
+    });
+    
+  } catch (error) {
+    console.error('Error eliminando plato:', error);
+    res.status(500).json({ exito: false, mensaje: "Error al eliminar plato" });
+  }
+});
+
+// Actualizar disponibilidad de plato
+app.put('/api/admin/menu/plato/:id/disponibilidad', async (req, res) => {
   const { id } = req.params;
   const { disponible } = req.body;
   
   try {
-    await pool.query(
-      'UPDATE platos SET disponible = $1 WHERE id = $2',
+    const resultado = await pool.query(
+      'UPDATE platos SET disponible = $1, actualizado_en = NOW() WHERE id = $2 RETURNING *',
       [disponible, id]
     );
     
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({ exito: false, mensaje: "Plato no encontrado" });
+    }
+    
     await actualizarArchivoEspejo();
-    res.json({ exito: true, mensaje: "Disponibilidad actualizada" });
+    res.json({ 
+      exito: true, 
+      plato: resultado.rows[0],
+      mensaje: `Plato marcado como ${disponible ? 'disponible' : 'no disponible'}` 
+    });
   } catch (error) {
+    console.error('Error actualizando disponibilidad:', error);
     res.status(500).json({ exito: false, mensaje: "Error al actualizar disponibilidad" });
+  }
+});
+
+// Subir imagen de plato (simple, guardando URL)
+app.post('/api/admin/menu/plato/imagen', async (req, res) => {
+  // Por ahora, implementamos un endpoint simple que recibe una URL
+  // En el futuro se puede extender para manejar archivos con multer
+  const { imagen_url } = req.body;
+  
+  if (!imagen_url) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Se requiere una URL de imagen"
+    });
+  }
+  
+  try {
+    // Validar que la URL sea válida
+    new URL(imagen_url);
+    
+    res.json({
+      exito: true,
+      imagen_url: imagen_url,
+      mensaje: "URL de imagen procesada correctamente"
+    });
+  } catch (error) {
+    res.status(400).json({
+      exito: false,
+      mensaje: "URL de imagen no válida"
+    });
   }
 });
 
