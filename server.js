@@ -177,10 +177,15 @@ async function actualizarArchivoEspejo() {
     archivoEspejo.ultima_actualizacion = new Date().toISOString();
     archivoEspejo.edad_segundos = 0;
     
-    // Guardar en archivo físico como respaldo
+    // Asegurar que la carpeta /archivos existe
+    const mirrorFolder = path.join(__dirname, 'archivos');
+    await fs.mkdir(mirrorFolder, { recursive: true });
+
+    // Guardar el archivo espejo en /archivos/espejo.json
     await fs.writeFile(
-      path.join(__dirname, 'archivo_espejo.json'),
-      JSON.stringify(archivoEspejo, null, 2)
+      path.join(mirrorFolder, 'espejo.json'),
+      JSON.stringify(archivoEspejo, null, 2),
+      'utf8'
     );
     
     console.log(`✅ Archivo Espejo actualizado en ${Date.now() - inicio}ms`);
@@ -286,9 +291,13 @@ async function generarEspejo() {
     espejo.ultima_actualizacion = new Date().toISOString();
     espejo.edad_segundos = 0;
     
-    // Guardar en archivo espejo.json
-    const archivoPath = path.join(__dirname, 'espejo.json');
-    await fs.writeFile(archivoPath, JSON.stringify(espejo, null, 2));
+    // Asegurar que la carpeta /archivos existe
+    const mirrorFolder = path.join(__dirname, 'archivos');
+    await fs.mkdir(mirrorFolder, { recursive: true });
+
+    // Guardar en archivo espejo.json en /archivos/
+    const archivoPath = path.join(mirrorFolder, 'espejo.json');
+    await fs.writeFile(archivoPath, JSON.stringify(espejo, null, 2), 'utf8');
     
     const tiempoTotal = Date.now() - inicio;
     console.log(`✅ Archivo espejo.json generado exitosamente en ${tiempoTotal}ms`);
@@ -315,7 +324,7 @@ async function generarEspejo() {
  */
 async function leerEspejoDesdeArchivo() {
   try {
-    const archivoPath = path.join(__dirname, 'espejo.json');
+    const archivoPath = path.join(__dirname, 'archivos', 'espejo.json');
     
     // Verificar si el archivo existe
     try {
