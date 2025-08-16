@@ -1223,16 +1223,24 @@ app.post('/api/admin/menu/plato', async (req, res) => {
     
     const plato = platoQuery.rows[0];
     
-    // Asociar alérgenos si se proporcionan
+    // Asociar alérgenos si se proporcionan (filtrar null/empty)
     if (Array.isArray(alergenos) && alergenos.length > 0) {
       for (const alergenoNombre of alergenos) {
+        // Validar que el nombre no sea null/empty/undefined
+        if (!alergenoNombre || typeof alergenoNombre !== 'string' || alergenoNombre.trim() === '') {
+          console.warn('Skipping invalid allergen:', alergenoNombre);
+          continue;
+        }
+        
+        const nombreLimpio = alergenoNombre.trim();
+        
         // Buscar o crear alérgeno
-        let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [alergenoNombre]);
+        let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [nombreLimpio]);
         
         if (alergeno.rows.length === 0) {
           alergeno = await client.query(
             'INSERT INTO alergenos (nombre) VALUES ($1) RETURNING id',
-            [alergenoNombre]
+            [nombreLimpio]
           );
         }
         
@@ -1318,16 +1326,24 @@ app.put('/api/admin/menu/plato/:id', async (req, res) => {
       // Eliminar alérgenos existentes
       await client.query('DELETE FROM platos_alergenos WHERE plato_id = $1', [id]);
       
-      // Añadir nuevos alérgenos
+      // Añadir nuevos alérgenos (filtrar null/empty)
       if (Array.isArray(alergenos) && alergenos.length > 0) {
         for (const alergenoNombre of alergenos) {
+          // Validar que el nombre no sea null/empty/undefined
+          if (!alergenoNombre || typeof alergenoNombre !== 'string' || alergenoNombre.trim() === '') {
+            console.warn('Skipping invalid allergen:', alergenoNombre);
+            continue;
+          }
+          
+          const nombreLimpio = alergenoNombre.trim();
+          
           // Buscar o crear alérgeno
-          let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [alergenoNombre]);
+          let alergeno = await client.query('SELECT id FROM alergenos WHERE nombre = $1', [nombreLimpio]);
           
           if (alergeno.rows.length === 0) {
             alergeno = await client.query(
               'INSERT INTO alergenos (nombre) VALUES ($1) RETURNING id',
-              [alergenoNombre]
+              [nombreLimpio]
             );
           }
           
