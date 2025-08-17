@@ -2334,6 +2334,215 @@ app.get('/api/admin/estadisticas', async (req, res) => {
 // Añadir estos endpoints al archivo server.js después de los endpoints existentes
 
 // ============================================
+// ENDPOINTS - GESTIÓN DE HORARIOS
+// ============================================
+
+// Obtener todos los horarios
+app.get('/api/admin/horarios', async (req, res) => {
+  try {
+    const horarios = await pool.query(`
+      SELECT 
+        id,
+        dia_semana,
+        apertura,
+        cierre,
+        turno_comida_inicio,
+        turno_comida_fin,
+        turno_cena_inicio,
+        turno_cena_fin,
+        cerrado,
+        capacidad_reducida,
+        porcentaje_capacidad
+      FROM horarios 
+      ORDER BY dia_semana
+    `);
+
+    // Convertir a formato más usable para el frontend
+    const horariosFormateados = [];
+    const diasSemana = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+    
+    for (let i = 0; i <= 6; i++) {
+      const horarioDia = horarios.rows.find(h => h.dia_semana === i);
+      horariosFormateados.push({
+        dia_semana: i,
+        nombre_dia: diasSemana[i],
+        apertura: horarioDia?.apertura || null,
+        cierre: horarioDia?.cierre || null,
+        turno_comida_inicio: horarioDia?.turno_comida_inicio || null,
+        turno_comida_fin: horarioDia?.turno_comida_fin || null,
+        turno_cena_inicio: horarioDia?.turno_cena_inicio || null,
+        turno_cena_fin: horarioDia?.turno_cena_fin || null,
+        cerrado: horarioDia?.cerrado || false,
+        capacidad_reducida: horarioDia?.capacidad_reducida || false,
+        porcentaje_capacidad: horarioDia?.porcentaje_capacidad || 100
+      });
+    }
+
+    res.json({
+      exito: true,
+      horarios: horariosFormateados
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo horarios:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Actualizar horarios
+app.put('/api/admin/horarios', async (req, res) => {
+  try {
+    const { horarios } = req.body;
+
+    if (!horarios || !Array.isArray(horarios)) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: 'Se requiere un array de horarios'
+      });
+    }
+
+    // Iniciar transacción
+    await pool.query('BEGIN');
+
+    try {
+      // Eliminar horarios existentes
+      await pool.query('DELETE FROM horarios');
+
+      // Insertar nuevos horarios
+      for (const horario of horarios) {
+        if (!horario.cerrado) {
+          await pool.query(`
+            INSERT INTO horarios (
+              dia_semana, apertura, cierre, turno_comida_inicio, turno_comida_fin,
+              turno_cena_inicio, turno_cena_fin, cerrado, capacidad_reducida, porcentaje_capacidad
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          `, [
+            horario.dia_semana,
+            horario.apertura,
+            horario.cierre,
+            horario.turno_comida_inicio,
+            horario.turno_comida_fin,
+            horario.turno_cena_inicio,
+            horario.turno_cena_fin,
+            false,
+            horario.capacidad_reducida || false,
+            horario.porcentaje_capacidad || 100
+          ]);
+        } else {
+          // Para días cerrados, solo marcar como cerrado
+          await pool.query(`
+            INSERT INTO horarios (dia_semana, cerrado) VALUES ($1, true)
+          `, [horario.dia_semana]);
+        }
+      }
+
+      await pool.query('COMMIT');
+
+      // Actualizar archivo espejo
+      await actualizarArchivoEspejo();
+
+      res.json({
+        exito: true,
+        mensaje: 'Horarios actualizados correctamente'
+      });
+
+    } catch (innerError) {
+      await pool.query('ROLLBACK');
+      throw innerError;
+    }
+
+  } catch (error) {
+    console.error('❌ Error actualizando horarios:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Actualizar horario de un día específico
+app.put('/api/admin/horarios/:dia', async (req, res) => {
+  try {
+    const dia = parseInt(req.params.dia);
+    const horario = req.body;
+
+    if (dia < 0 || dia > 6) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: 'Día de semana inválido (0-6)'
+      });
+    }
+
+    if (horario.cerrado) {
+      // Marcar día como cerrado
+      await pool.query(`
+        INSERT INTO horarios (dia_semana, cerrado) 
+        VALUES ($1, true)
+        ON CONFLICT (dia_semana) 
+        DO UPDATE SET 
+          cerrado = true,
+          apertura = NULL,
+          cierre = NULL,
+          turno_comida_inicio = NULL,
+          turno_comida_fin = NULL,
+          turno_cena_inicio = NULL,
+          turno_cena_fin = NULL
+      `, [dia]);
+    } else {
+      // Actualizar horarios del día
+      await pool.query(`
+        INSERT INTO horarios (
+          dia_semana, apertura, cierre, turno_comida_inicio, turno_comida_fin,
+          turno_cena_inicio, turno_cena_fin, cerrado, capacidad_reducida, porcentaje_capacidad
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8, $9)
+        ON CONFLICT (dia_semana) 
+        DO UPDATE SET 
+          apertura = EXCLUDED.apertura,
+          cierre = EXCLUDED.cierre,
+          turno_comida_inicio = EXCLUDED.turno_comida_inicio,
+          turno_comida_fin = EXCLUDED.turno_comida_fin,
+          turno_cena_inicio = EXCLUDED.turno_cena_inicio,
+          turno_cena_fin = EXCLUDED.turno_cena_fin,
+          cerrado = false,
+          capacidad_reducida = EXCLUDED.capacidad_reducida,
+          porcentaje_capacidad = EXCLUDED.porcentaje_capacidad
+      `, [
+        dia,
+        horario.apertura,
+        horario.cierre,
+        horario.turno_comida_inicio,
+        horario.turno_comida_fin,
+        horario.turno_cena_inicio,
+        horario.turno_cena_fin,
+        horario.capacidad_reducida || false,
+        horario.porcentaje_capacidad || 100
+      ]);
+    }
+
+    // Actualizar archivo espejo
+    await actualizarArchivoEspejo();
+
+    res.json({
+      exito: true,
+      mensaje: `Horario del ${['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][dia]} actualizado correctamente`
+    });
+
+  } catch (error) {
+    console.error('❌ Error actualizando horario del día:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// ============================================
 // ENDPOINTS - INFORMACIÓN DEL RESTAURANTE
 // ============================================
 
@@ -2569,6 +2778,9 @@ app.listen(PORT, async () => {
   console.log(`   - DEL  /api/cancelar-reserva        → Cancelar reserva`);
   console.log(`   - GET  /api/ver-menu                → Ver menú del restaurante`);
   console.log(`   - GET  /api/consultar-horario       → Consultar horarios`);
+  console.log(`   - GET  /api/admin/horarios          → Obtener horarios del restaurante`);
+  console.log(`   - PUT  /api/admin/horarios          → Actualizar horarios del restaurante`);
+  console.log(`   - PUT  /api/admin/horarios/:dia     → Actualizar horario de un día específico`);
   console.log(`   - GET  /api/admin/*                 → Endpoints del dashboard\n`);
   
   await inicializarDB();
