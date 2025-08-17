@@ -14,43 +14,25 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3002;
 
-// Middlewares
-app.use(cors({
-  origin: function (origin, callback) {
-    // Permitir peticiones sin origen (como Postman o ChatGPT)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:3001', 
-      'https://dashboard-2-production.up.railway.app',
-      'https://chat.openai.com',
-      'https://chatgpt.com'
-    ];
-    
-    // Permitir cualquier origen de OpenAI/ChatGPT
-    if (origin.includes('openai.com') || origin.includes('chatgpt.com')) {
-      return callback(null, true);
-    }
-    
-    // Permitir orígenes específicos
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    // Para desarrollo, permitir cualquier origen
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    
-    // En producción, permitir todo temporalmente para ChatGPT
-    return callback(null, true);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'openai-conversation-id', 'openai-ephemeral-user-id'],
-  exposedHeaders: ['Content-Type']
-}));
+// Middlewares - CORS simplificado para permitir todo (ChatGPT necesita esto)
+app.use(cors());
+
+// Log de todas las peticiones para debugging
+app.use((req, res, next) => {
+  console.log(`📨 ${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin || 'Sin origen'}`);
+  
+  // Headers específicos para ChatGPT
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', '*');
+  res.header('Access-Control-Max-Age', '86400');
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
 app.use(express.json());
 
 // ===== CONFIGURACIÓN ANTI-CACHE PARA GPT =====
@@ -468,6 +450,42 @@ app.get('/api/resumen', (req, res) => {
 // ============================================
 // ENDPOINTS PARA EL GPT PERSONALIZADO
 // ============================================
+
+// 🧪 Endpoint de prueba simple para ChatGPT
+app.get('/api/test', (req, res) => {
+  console.log('✅ Test endpoint llamado desde:', req.headers.origin || 'Sin origen');
+  res.json({
+    exito: true,
+    mensaje: 'Conexión exitosa con GastroBot',
+    timestamp: new Date().toISOString(),
+    servidor: 'Railway'
+  });
+});
+
+// 🧪 Endpoint simplificado del menú para ChatGPT
+app.get('/api/menu-simple', async (req, res) => {
+  try {
+    console.log('📋 Menu simple solicitado');
+    const menuQuery = await pool.query(`
+      SELECT c.nombre as categoria, p.nombre as plato, p.precio, p.descripcion
+      FROM platos p
+      JOIN categorias_menu c ON p.categoria_id = c.id
+      WHERE p.disponible = true
+      ORDER BY c.orden, p.nombre
+    `);
+    
+    res.json({
+      exito: true,
+      platos: menuQuery.rows
+    });
+  } catch (error) {
+    console.error('Error en menu-simple:', error);
+    res.json({
+      exito: false,
+      mensaje: 'Error al obtener el menú'
+    });
+  }
+});
 
 // 🔧 Endpoint de control manual para regenerar el espejo desde navegador o curl
 app.get('/api/forzar-espejo', async (req, res) => {
