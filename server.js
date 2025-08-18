@@ -1355,7 +1355,7 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
   }
 });
 
-// Cancelar reserva
+// Cancelar reserva por código
 app.delete('/api/cancelar-reserva', verificarFrescura, async (req, res) => {
   const { codigo_reserva, motivo = "Cancelado por cliente" } = req.body;
   
@@ -1439,6 +1439,69 @@ app.delete('/api/cancelar-reserva', verificarFrescura, async (req, res) => {
     res.status(500).json({
       exito: false,
       mensaje: "Error al cancelar la reserva"
+    });
+  }
+});
+
+// Eliminar reserva por ID (desde Dashboard)
+app.delete('/api/cancelar-reserva/:id', verificarFrescura, async (req, res) => {
+  const { id } = req.params;
+  const { motivo = "Eliminado desde dashboard" } = req.body;
+  
+  try {
+    // Buscar la reserva antes de eliminarla
+    const reservaExistente = await pool.query(
+      `SELECT r.*, c.nombre, c.telefono, m.numero_mesa 
+       FROM reservas r
+       JOIN clientes c ON r.cliente_id = c.id
+       JOIN mesas m ON r.mesa_id = m.id
+       WHERE r.id = $1`,
+      [id]
+    );
+    
+    if (reservaExistente.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: "Reserva no encontrada"
+      });
+    }
+    
+    const reserva = reservaExistente.rows[0];
+    
+    // Eliminar la reserva completamente
+    await pool.query('DELETE FROM reservas WHERE id = $1', [id]);
+    
+    // Eliminar del historial de la mesa si existe
+    await pool.query('DELETE FROM historial_mesas WHERE reserva_id = $1', [id]);
+    
+    // Registrar el cambio
+    await registrarCambio('eliminar_reserva', id, 
+      { estado: reserva.estado, nombre: reserva.nombre }, 
+      { estado: 'eliminada', motivo }, 
+      'dashboard'
+    );
+    
+    // Actualizar archivo espejo
+    await actualizarArchivoEspejo();
+    await generarEspejo();
+    
+    res.json({
+      exito: true,
+      mensaje: `Reserva de ${reserva.nombre} eliminada correctamente`,
+      reserva_eliminada: {
+        id: reserva.id,
+        nombre: reserva.nombre,
+        fecha: reserva.fecha,
+        hora: reserva.hora,
+        mesa: reserva.numero_mesa
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error eliminando reserva:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al eliminar la reserva"
     });
   }
 });
