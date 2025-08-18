@@ -1151,23 +1151,42 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     
     let cliente_id;
     if (clienteQuery.rows.length === 0) {
-      const nuevoCliente = await client.query(
-        'INSERT INTO clientes (nombre, telefono, email, alergias) VALUES ($1, $2, $3, $4::TEXT[]) RETURNING id',
-        [nombre, telefono, email, alergias && alergias !== '' ? [alergias] : null]
-      );
+      let nuevoCliente;
+      if (alergias && alergias !== '') {
+        nuevoCliente = await client.query(
+          'INSERT INTO clientes (nombre, telefono, email, alergias) VALUES ($1, $2, $3, $4::TEXT[]) RETURNING id',
+          [nombre, telefono, email, [alergias]]
+        );
+      } else {
+        nuevoCliente = await client.query(
+          'INSERT INTO clientes (nombre, telefono, email, alergias) VALUES ($1, $2, $3, NULL) RETURNING id',
+          [nombre, telefono, email]
+        );
+      }
       cliente_id = nuevoCliente.rows[0].id;
     } else {
       cliente_id = clienteQuery.rows[0].id;
       // Actualizar datos del cliente
-      await client.query(
-        `UPDATE clientes 
-         SET nombre = $1, 
-             email = COALESCE($2, email),
-             alergias = CASE WHEN $3 IS NOT NULL AND $3 != '' THEN array_append(COALESCE(alergias, ARRAY[]::TEXT[]), $3::TEXT) ELSE alergias END,
-             total_reservas = total_reservas + 1
-         WHERE id = $4`,
-        [nombre, email, alergias, cliente_id]
-      );
+      if (alergias && alergias !== '') {
+        await client.query(
+          `UPDATE clientes 
+           SET nombre = $1, 
+               email = COALESCE($2, email),
+               alergias = array_append(COALESCE(alergias, ARRAY[]::TEXT[]), $3::TEXT),
+               total_reservas = total_reservas + 1
+           WHERE id = $4`,
+          [nombre, email, alergias, cliente_id]
+        );
+      } else {
+        await client.query(
+          `UPDATE clientes 
+           SET nombre = $1, 
+               email = COALESCE($2, email),
+               total_reservas = total_reservas + 1
+           WHERE id = $3`,
+          [nombre, email, cliente_id]
+        );
+      }
     }
     
     // Generar código de reserva único
