@@ -1152,8 +1152,8 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     let cliente_id;
     if (clienteQuery.rows.length === 0) {
       const nuevoCliente = await client.query(
-        'INSERT INTO clientes (nombre, telefono, email, alergias) VALUES ($1, $2, $3, $4) RETURNING id',
-        [nombre, telefono, email, alergias ? [alergias] : null]
+        'INSERT INTO clientes (nombre, telefono, email, alergias) VALUES ($1, $2, $3, $4::TEXT[]) RETURNING id',
+        [nombre, telefono, email, alergias && alergias !== '' ? [alergias] : null]
       );
       cliente_id = nuevoCliente.rows[0].id;
     } else {
@@ -1163,7 +1163,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
         `UPDATE clientes 
          SET nombre = $1, 
              email = COALESCE($2, email),
-             alergias = CASE WHEN $3 IS NOT NULL THEN array_append(alergias, $3) ELSE alergias END,
+             alergias = CASE WHEN $3 IS NOT NULL AND $3 != '' THEN array_append(COALESCE(alergias, ARRAY[]::TEXT[]), $3::TEXT) ELSE alergias END,
              total_reservas = total_reservas + 1
          WHERE id = $4`,
         [nombre, email, alergias, cliente_id]
