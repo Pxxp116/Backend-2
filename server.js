@@ -948,9 +948,10 @@ function obtenerHorarioDia(fecha) {
  * Valida si una hora está dentro del horario de apertura
  * @param {string} fecha - Fecha en formato YYYY-MM-DD
  * @param {string} hora - Hora en formato HH:MM o HH:MM:SS
+ * @param {number} duracion - Duración de la reserva en minutos (opcional)
  * @returns {object} Resultado de la validación
  */
-function validarHorarioReserva(fecha, hora) {
+function validarHorarioReserva(fecha, hora, duracion = null) {
   const horarioDia = obtenerHorarioDia(fecha);
   
   // Si está cerrado ese día
@@ -961,6 +962,12 @@ function validarHorarioReserva(fecha, hora) {
       horario: null,
       sugerencia: obtenerProximoDiaDisponible(fecha)
     };
+  }
+  
+  // Obtener duración de las políticas si no se proporciona
+  if (!duracion) {
+    duracion = archivoEspejo.politicas?.duracion_estandar_min || 
+               archivoEspejo.politicas?.duracion_reserva || 120; // 120 minutos por defecto
   }
   
   // Normalizar formato de hora (quitar segundos si los tiene)
@@ -980,8 +987,11 @@ function validarHorarioReserva(fecha, hora) {
   const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
   const minutosCierre = horaCierre * 60 + minCierre;
   
-  // Margen de 30 minutos antes del cierre para última reserva
-  const minutosUltimaReserva = minutosCierre - 30;
+  // Calcular la hora en que terminaría la reserva
+  const minutosFinReserva = minutosReserva + duracion;
+  
+  // La última hora válida es aquella donde la reserva termina antes del cierre
+  const minutosUltimaReserva = minutosCierre - duracion;
   
   if (minutosReserva < minutosApertura) {
     return {
@@ -995,10 +1005,24 @@ function validarHorarioReserva(fecha, hora) {
     };
   }
   
+  // Verificar si la reserva terminaría después del cierre
+  if (minutosFinReserva > minutosCierre) {
+    return {
+      valido: false,
+      motivo: `La reserva terminaría después del cierre (${horaCierreStr}). Con ${duracion} minutos de duración, la última hora disponible es ${formatearHora(minutosUltimaReserva)}`,
+      horario: horarioDia,
+      sugerencia: {
+        hora: formatearHora(minutosUltimaReserva),
+        mensaje: `La hora más tarde disponible es ${formatearHora(minutosUltimaReserva)} (reserva de ${duracion} minutos terminando a las ${horaCierreStr})`
+      }
+    };
+  }
+  
+  // Verificar que se pueda hacer reserva antes del cierre (redundancia de seguridad)
   if (minutosReserva > minutosUltimaReserva) {
     return {
       valido: false,
-      motivo: `La última reserva se acepta 30 minutos antes del cierre (${formatearHora(minutosUltimaReserva)})`,
+      motivo: `No hay tiempo suficiente para una reserva de ${duracion} minutos. La última hora disponible es ${formatearHora(minutosUltimaReserva)}`,
       horario: horarioDia,
       sugerencia: {
         hora: formatearHora(minutosUltimaReserva),
@@ -1072,7 +1096,7 @@ app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
 
 // Validar horario para reserva (NUEVO ENDPOINT)
 app.post('/api/validar-horario-reserva', verificarFrescura, (req, res) => {
-  const { fecha, hora } = req.body;
+  const { fecha, hora, duracion } = req.body;
   
   if (!fecha || !hora) {
     return res.status(400).json({
@@ -1081,7 +1105,7 @@ app.post('/api/validar-horario-reserva', verificarFrescura, (req, res) => {
     });
   }
   
-  const validacion = validarHorarioReserva(fecha, hora);
+  const validacion = validarHorarioReserva(fecha, hora, duracion);
   
   if (validacion.valido) {
     res.json({
@@ -1245,13 +1269,14 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
   }
   
   // VALIDAR HORARIO ANTES DE BUSCAR MESA
-  const validacionHorario = validarHorarioReserva(fecha, hora);
+  const validacionHorario = validarHorarioReserva(fecha, hora, duracion);
   
   if (!validacionHorario.valido) {
     return res.status(400).json({
       exito: false,
       mensaje: validacionHorario.motivo,
       horario_restaurante: validacionHorario.horario,
+      duracion_reserva: duracion,
       sugerencia: validacionHorario.sugerencia,
       alternativa: validacionHorario.sugerencia ? {
         fecha: validacionHorario.sugerencia.fecha || fecha,
@@ -1373,13 +1398,14 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
   }
   
   // VALIDAR HORARIO ANTES DE CREAR LA RESERVA
-  const validacionHorario = validarHorarioReserva(fecha, hora);
+  const validacionHorario = validarHorarioReserva(fecha, hora, duracion);
   
   if (!validacionHorario.valido) {
     return res.status(400).json({
       exito: false,
       mensaje: validacionHorario.motivo,
       horario_restaurante: validacionHorario.horario,
+      duracion_reserva: duracion,
       sugerencia: validacionHorario.sugerencia,
       alternativa: validacionHorario.sugerencia ? {
         fecha: validacionHorario.sugerencia.fecha || fecha,
@@ -1563,7 +1589,11 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
       
       // VALIDAR HORARIO SI CAMBIA FECHA U HORA
       if (fecha || hora) {
-        const validacionHorario = validarHorarioReserva(nuevaFecha, nuevaHora);
+        // Usar la duración actual de la reserva o la duración por defecto
+        const duracionReserva = reserva.duracion || 
+                               archivoEspejo.politicas?.duracion_estandar_min || 
+                               archivoEspejo.politicas?.duracion_reserva || 120;
+        const validacionHorario = validarHorarioReserva(nuevaFecha, nuevaHora, duracionReserva);
         
         if (!validacionHorario.valido) {
           await client.query('ROLLBACK');
@@ -1571,6 +1601,7 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
             exito: false,
             mensaje: validacionHorario.motivo,
             horario_restaurante: validacionHorario.horario,
+            duracion_reserva: duracionReserva,
             sugerencia: validacionHorario.sugerencia,
             alternativa: validacionHorario.sugerencia ? {
               fecha: validacionHorario.sugerencia.fecha || nuevaFecha,
