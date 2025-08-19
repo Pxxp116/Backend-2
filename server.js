@@ -945,6 +945,18 @@ function limpiarCacheHorarios() {
 }
 
 /**
+ * Endpoint para forzar limpieza de cache (útil para debugging)
+ */
+app.post('/api/admin/limpiar-cache', (req, res) => {
+  limpiarCacheHorarios();
+  res.json({
+    exito: true,
+    mensaje: 'Cache limpiado correctamente',
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
  * Obtiene el horario para una fecha específica directamente de la BD
  * @param {string} fecha - Fecha en formato YYYY-MM-DD
  * @returns {Promise<object>} Horario del día
@@ -1002,7 +1014,8 @@ async function obtenerDuracionReserva() {
   
   // Verificar si el cache es válido
   if (cachePoliticas.data && (now - cachePoliticas.timestamp) < cachePoliticas.TTL) {
-    return cachePoliticas.data.duracion_estandar_min || 
+    return cachePoliticas.data.tiempo_mesa_minutos || 
+           cachePoliticas.data.duracion_estandar_min || 
            cachePoliticas.data.duracion_reserva || 120;
   }
   
@@ -1013,12 +1026,14 @@ async function obtenerDuracionReserva() {
     cachePoliticas.data = query.rows[0] || {};
     cachePoliticas.timestamp = now;
     
-    return query.rows[0]?.duracion_estandar_min || 
+    return query.rows[0]?.tiempo_mesa_minutos || 
+           query.rows[0]?.duracion_estandar_min || 
            query.rows[0]?.duracion_reserva || 120;
   } catch (error) {
     console.error('Error obteniendo duración:', error);
     // Fallback al archivo espejo o valor por defecto
-    return archivoEspejo.politicas?.duracion_estandar_min || 
+    return archivoEspejo.politicas?.tiempo_mesa_minutos ||
+           archivoEspejo.politicas?.duracion_estandar_min || 
            archivoEspejo.politicas?.duracion_reserva || 120;
   }
 }
