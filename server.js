@@ -1078,8 +1078,15 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   const minutosApertura = horaApertura * 60 + minApertura;
   
   const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
-  // HOTFIX: Manejar medianoche (00:00) como 1440 minutos (24:00) para evitar horas negativas
-  const minutosCierre = horaCierre === 0 && minCierre === 0 ? 1440 : horaCierre * 60 + minCierre;
+  // HOTFIX: Manejar horarios del día siguiente (00:00-06:00) como día siguiente
+  let minutosCierre;
+  if (horaCierre === 0 && minCierre === 0) {
+    minutosCierre = 1440; // Medianoche (24:00)
+  } else if (horaCierre >= 0 && horaCierre <= 6) {
+    minutosCierre = 1440 + horaCierre * 60 + minCierre; // Día siguiente
+  } else {
+    minutosCierre = horaCierre * 60 + minCierre; // Mismo día
+  }
   
   // Calcular la hora en que terminaría la reserva
   const minutosFinReserva = minutosReserva + duracion;
