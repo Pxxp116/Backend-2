@@ -108,6 +108,9 @@ async function actualizarArchivoEspejo() {
   try {
     const inicio = Date.now();
     
+    // Limpiar cache cuando se actualiza el espejo
+    limpiarCacheHorarios();
+    
     // Obtener datos del restaurante
     const restauranteQuery = await pool.query('SELECT * FROM restaurante LIMIT 1');
     archivoEspejo.restaurante = restauranteQuery.rows[0] || {};
@@ -914,34 +917,110 @@ app.get('/api/espejo-gpt', (req, res) => {
 });
 
 // ============================================
-// FUNCIONES DE VALIDACIÓN DE HORARIOS
+// FUNCIONES DE VALIDACIÓN DE HORARIOS CON CACHE
 // ============================================
 
+// Cache para horarios y políticas (se limpia cada 5 minutos)
+let cacheHorarios = {
+  data: null,
+  timestamp: 0,
+  TTL: 5 * 60 * 1000 // 5 minutos
+};
+
+let cachePoliticas = {
+  data: null,
+  timestamp: 0,
+  TTL: 5 * 60 * 1000 // 5 minutos
+};
+
 /**
- * Obtiene el horario para una fecha específica
- * @param {string} fecha - Fecha en formato YYYY-MM-DD
- * @returns {object} Horario del día
+ * Limpia el cache cuando hay cambios desde el dashboard
  */
-function obtenerHorarioDia(fecha) {
-  // Buscar excepciones primero
-  const excepcion = archivoEspejo.horarios?.excepciones?.find(e => 
-    e.fecha === fecha
-  );
+function limpiarCacheHorarios() {
+  cacheHorarios.data = null;
+  cacheHorarios.timestamp = 0;
+  cachePoliticas.data = null;
+  cachePoliticas.timestamp = 0;
+  console.log('🔄 Cache de horarios y políticas limpiado por cambios en dashboard');
+}
+
+/**
+ * Obtiene el horario para una fecha específica directamente de la BD
+ * @param {string} fecha - Fecha en formato YYYY-MM-DD
+ * @returns {Promise<object>} Horario del día
+ */
+async function obtenerHorarioDia(fecha) {
+  try {
+    // Buscar excepciones primero
+    const excepcionQuery = await pool.query(
+      'SELECT * FROM excepciones_horario WHERE fecha = $1',
+      [fecha]
+    );
+    
+    if (excepcionQuery.rows.length > 0) {
+      return {
+        ...excepcionQuery.rows[0],
+        es_excepcion: true
+      };
+    }
+    
+    // Si no hay excepción, buscar horario regular
+    const diaSemana = new Date(fecha).getDay();
+    const horarioQuery = await pool.query(
+      'SELECT * FROM horarios WHERE dia_semana = $1',
+      [diaSemana]
+    );
+    
+    return horarioQuery.rows[0] || { cerrado: true };
+    
+  } catch (error) {
+    console.error('Error obteniendo horario:', error);
+    // Fallback al archivo espejo si hay error de BD
+    const excepcion = archivoEspejo.horarios?.excepciones?.find(e => 
+      e.fecha === fecha
+    );
+    
+    if (excepcion) {
+      return { ...excepcion, es_excepcion: true };
+    }
+    
+    const diaSemana = new Date(fecha).getDay();
+    const horarioRegular = archivoEspejo.horarios?.regular?.find(h => 
+      h.dia_semana === diaSemana
+    );
+    
+    return horarioRegular || { cerrado: true };
+  }
+}
+
+/**
+ * Obtiene la duración de reserva con cache inteligente
+ * @returns {Promise<number>} Duración en minutos
+ */
+async function obtenerDuracionReserva() {
+  const now = Date.now();
   
-  if (excepcion) {
-    return {
-      ...excepcion,
-      es_excepcion: true
-    };
+  // Verificar si el cache es válido
+  if (cachePoliticas.data && (now - cachePoliticas.timestamp) < cachePoliticas.TTL) {
+    return cachePoliticas.data.duracion_estandar_min || 
+           cachePoliticas.data.duracion_reserva || 120;
   }
   
-  // Si no hay excepción, buscar horario regular
-  const diaSemana = new Date(fecha).getDay();
-  const horarioRegular = archivoEspejo.horarios?.regular?.find(h => 
-    h.dia_semana === diaSemana
-  );
-  
-  return horarioRegular || { cerrado: true };
+  try {
+    const query = await pool.query('SELECT * FROM politicas LIMIT 1');
+    
+    // Actualizar cache
+    cachePoliticas.data = query.rows[0] || {};
+    cachePoliticas.timestamp = now;
+    
+    return query.rows[0]?.duracion_estandar_min || 
+           query.rows[0]?.duracion_reserva || 120;
+  } catch (error) {
+    console.error('Error obteniendo duración:', error);
+    // Fallback al archivo espejo o valor por defecto
+    return archivoEspejo.politicas?.duracion_estandar_min || 
+           archivoEspejo.politicas?.duracion_reserva || 120;
+  }
 }
 
 /**
@@ -949,10 +1028,10 @@ function obtenerHorarioDia(fecha) {
  * @param {string} fecha - Fecha en formato YYYY-MM-DD
  * @param {string} hora - Hora en formato HH:MM o HH:MM:SS
  * @param {number} duracion - Duración de la reserva en minutos (opcional)
- * @returns {object} Resultado de la validación
+ * @returns {Promise<object>} Resultado de la validación
  */
-function validarHorarioReserva(fecha, hora, duracion = null) {
-  const horarioDia = obtenerHorarioDia(fecha);
+async function validarHorarioReserva(fecha, hora, duracion = null) {
+  const horarioDia = await obtenerHorarioDia(fecha);
   
   // Si está cerrado ese día
   if (horarioDia.cerrado) {
@@ -960,14 +1039,13 @@ function validarHorarioReserva(fecha, hora, duracion = null) {
       valido: false,
       motivo: horarioDia.motivo || "El restaurante está cerrado este día",
       horario: null,
-      sugerencia: obtenerProximoDiaDisponible(fecha)
+      sugerencia: await obtenerProximoDiaDisponible(fecha)
     };
   }
   
   // Obtener duración de las políticas si no se proporciona
   if (!duracion) {
-    duracion = archivoEspejo.politicas?.duracion_estandar_min || 
-               archivoEspejo.politicas?.duracion_reserva || 120; // 120 minutos por defecto
+    duracion = await obtenerDuracionReserva();
   }
   
   // Normalizar formato de hora (quitar segundos si los tiene)
@@ -1050,13 +1128,13 @@ function formatearHora(minutos) {
 /**
  * Obtiene el próximo día disponible después de una fecha
  */
-function obtenerProximoDiaDisponible(fechaInicio) {
+async function obtenerProximoDiaDisponible(fechaInicio) {
   const fecha = new Date(fechaInicio);
   
   for (let i = 1; i <= 7; i++) {
     fecha.setDate(fecha.getDate() + 1);
     const fechaStr = fecha.toISOString().split('T')[0];
-    const horario = obtenerHorarioDia(fechaStr);
+    const horario = await obtenerHorarioDia(fechaStr);
     
     if (!horario.cerrado) {
       const horaApertura = (horario.apertura || horario.hora_apertura || '13:00').substring(0, 5);
@@ -1072,7 +1150,7 @@ function obtenerProximoDiaDisponible(fechaInicio) {
 }
 
 // Consultar horario específico
-app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
+app.get('/api/consultar-horario', verificarFrescura, async (req, res) => {
   const { fecha } = req.query;
   
   if (!fecha) {
@@ -1082,20 +1160,28 @@ app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
     });
   }
   
-  const horario = obtenerHorarioDia(fecha);
-  
-  res.json({
-    exito: true,
-    horario: horario,
-    es_excepcion: horario.es_excepcion || false,
-    mensaje: horario.cerrado ? 
-      `Cerrado el ${fecha}${horario.motivo ? ': ' + horario.motivo : ''}` : 
-      `Abierto de ${horario.apertura} a ${horario.cierre}`
-  });
+  try {
+    const horario = await obtenerHorarioDia(fecha);
+    
+    res.json({
+      exito: true,
+      horario: horario,
+      es_excepcion: horario.es_excepcion || false,
+      mensaje: horario.cerrado ? 
+        `Cerrado el ${fecha}${horario.motivo ? ': ' + horario.motivo : ''}` : 
+        `Abierto de ${(horario.apertura || horario.hora_apertura || '').substring(0,5)} a ${(horario.cierre || horario.hora_cierre || '').substring(0,5)}`
+    });
+  } catch (error) {
+    console.error('Error consultando horario:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al consultar el horario"
+    });
+  }
 });
 
 // Validar horario para reserva (NUEVO ENDPOINT)
-app.post('/api/validar-horario-reserva', verificarFrescura, (req, res) => {
+app.post('/api/validar-horario-reserva', verificarFrescura, async (req, res) => {
   const { fecha, hora, duracion } = req.body;
   
   if (!fecha || !hora) {
@@ -1105,37 +1191,40 @@ app.post('/api/validar-horario-reserva', verificarFrescura, (req, res) => {
     });
   }
   
-  const validacion = validarHorarioReserva(fecha, hora, duracion);
-  
-  if (validacion.valido) {
-    res.json({
-      exito: true,
-      valido: true,
-      mensaje: "Horario válido para reserva",
-      horario: validacion.horario,
-      detalles: {
-        apertura: validacion.horario.apertura,
-        cierre: validacion.horario.cierre,
-        ultima_reserva: formatearHora(
-          validacion.horario.cierre ? 
-          (parseInt(validacion.horario.cierre.split(':')[0]) * 60 + 
-           parseInt(validacion.horario.cierre.split(':')[1]) - 30) : 
-          1410 // 23:30 por defecto
-        )
-      }
-    });
-  } else {
-    res.json({
+  try {
+    const validacion = await validarHorarioReserva(fecha, hora, duracion);
+    
+    if (validacion.valido) {
+      res.json({
+        exito: true,
+        valido: true,
+        mensaje: "Horario válido para reserva",
+        horario: validacion.horario,
+        detalles: {
+          apertura: (validacion.horario.apertura || validacion.horario.hora_apertura || '').substring(0,5),
+          cierre: (validacion.horario.cierre || validacion.horario.hora_cierre || '').substring(0,5),
+          duracion_reserva: duracion || await obtenerDuracionReserva()
+        }
+      });
+    } else {
+      res.json({
+        exito: false,
+        valido: false,
+        mensaje: validacion.motivo,
+        horario: validacion.horario,
+        sugerencia: validacion.sugerencia,
+        alternativa: validacion.sugerencia ? {
+          fecha: validacion.sugerencia.fecha || fecha,
+          hora: validacion.sugerencia.hora,
+          mensaje: validacion.sugerencia.mensaje
+        } : null
+      });
+    }
+  } catch (error) {
+    console.error('Error validando horario:', error);
+    res.status(500).json({
       exito: false,
-      valido: false,
-      mensaje: validacion.motivo,
-      horario: validacion.horario,
-      sugerencia: validacion.sugerencia,
-      alternativa: validacion.sugerencia ? {
-        fecha: validacion.sugerencia.fecha || fecha,
-        hora: validacion.sugerencia.hora,
-        mensaje: validacion.sugerencia.mensaje
-      } : null
+      mensaje: "Error al validar el horario"
     });
   }
 });
@@ -1151,22 +1240,25 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
     });
   }
   
-  const horarioDia = obtenerHorarioDia(fecha);
-  
-  if (horarioDia.cerrado) {
-    const proximoDia = obtenerProximoDiaDisponible(fecha);
-    return res.json({
-      exito: false,
-      mensaje: `El restaurante está cerrado el ${fecha}`,
-      cerrado: true,
-      proximo_dia_disponible: proximoDia
-    });
-  }
-  
   try {
+    const horarioDia = await obtenerHorarioDia(fecha);
+    
+    if (horarioDia.cerrado) {
+      const proximoDia = await obtenerProximoDiaDisponible(fecha);
+      return res.json({
+        exito: false,
+        mensaje: `El restaurante está cerrado el ${fecha}`,
+        cerrado: true,
+        proximo_dia_disponible: proximoDia
+      });
+    }
+    
     // Generar slots de tiempo disponibles cada 30 minutos
-    const [horaApertura, minApertura] = horarioDia.apertura.split(':').map(Number);
-    const [horaCierre, minCierre] = horarioDia.cierre.split(':').map(Number);
+    const aperturaStr = (horarioDia.apertura || horarioDia.hora_apertura || '13:00').substring(0, 5);
+    const cierreStr = (horarioDia.cierre || horarioDia.hora_cierre || '23:00').substring(0, 5);
+    
+    const [horaApertura, minApertura] = aperturaStr.split(':').map(Number);
+    const [horaCierre, minCierre] = cierreStr.split(':').map(Number);
     const minutosApertura = horaApertura * 60 + minApertura;
     const minutosCierre = horaCierre * 60 + minCierre - 30; // 30 min antes del cierre
     
@@ -1207,8 +1299,8 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
       exito: true,
       fecha: fecha,
       horario_restaurante: {
-        apertura: horarioDia.apertura,
-        cierre: horarioDia.cierre
+        apertura: aperturaStr,
+        cierre: cierreStr
       },
       slots_disponibles: slots,
       total_slots: slots.length,
@@ -1269,20 +1361,28 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
   }
   
   // VALIDAR HORARIO ANTES DE BUSCAR MESA
-  const validacionHorario = validarHorarioReserva(fecha, hora, duracion);
-  
-  if (!validacionHorario.valido) {
-    return res.status(400).json({
+  try {
+    const validacionHorario = await validarHorarioReserva(fecha, hora, duracion);
+    
+    if (!validacionHorario.valido) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: validacionHorario.motivo,
+        horario_restaurante: validacionHorario.horario,
+        duracion_reserva: duracion,
+        sugerencia: validacionHorario.sugerencia,
+        alternativa: validacionHorario.sugerencia ? {
+          fecha: validacionHorario.sugerencia.fecha || fecha,
+          hora: validacionHorario.sugerencia.hora,
+          mensaje: validacionHorario.sugerencia.mensaje
+        } : null
+      });
+    }
+  } catch (error) {
+    console.error('Error validando horario en buscar-mesa:', error);
+    return res.status(500).json({
       exito: false,
-      mensaje: validacionHorario.motivo,
-      horario_restaurante: validacionHorario.horario,
-      duracion_reserva: duracion,
-      sugerencia: validacionHorario.sugerencia,
-      alternativa: validacionHorario.sugerencia ? {
-        fecha: validacionHorario.sugerencia.fecha || fecha,
-        hora: validacionHorario.sugerencia.hora,
-        mensaje: validacionHorario.sugerencia.mensaje
-      } : null
+      mensaje: "Error al validar el horario del restaurante"
     });
   }
   
@@ -1398,20 +1498,28 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
   }
   
   // VALIDAR HORARIO ANTES DE CREAR LA RESERVA
-  const validacionHorario = validarHorarioReserva(fecha, hora, duracion);
-  
-  if (!validacionHorario.valido) {
-    return res.status(400).json({
+  try {
+    const validacionHorario = await validarHorarioReserva(fecha, hora, duracion);
+    
+    if (!validacionHorario.valido) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: validacionHorario.motivo,
+        horario_restaurante: validacionHorario.horario,
+        duracion_reserva: duracion,
+        sugerencia: validacionHorario.sugerencia,
+        alternativa: validacionHorario.sugerencia ? {
+          fecha: validacionHorario.sugerencia.fecha || fecha,
+          hora: validacionHorario.sugerencia.hora,
+          mensaje: validacionHorario.sugerencia.mensaje
+        } : null
+      });
+    }
+  } catch (error) {
+    console.error('Error validando horario en crear-reserva:', error);
+    return res.status(500).json({
       exito: false,
-      mensaje: validacionHorario.motivo,
-      horario_restaurante: validacionHorario.horario,
-      duracion_reserva: duracion,
-      sugerencia: validacionHorario.sugerencia,
-      alternativa: validacionHorario.sugerencia ? {
-        fecha: validacionHorario.sugerencia.fecha || fecha,
-        hora: validacionHorario.sugerencia.hora,
-        mensaje: validacionHorario.sugerencia.mensaje
-      } : null
+      mensaje: "Error al validar el horario del restaurante"
     });
   }
   
@@ -1589,25 +1697,32 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
       
       // VALIDAR HORARIO SI CAMBIA FECHA U HORA
       if (fecha || hora) {
-        // Usar la duración actual de la reserva o la duración por defecto
-        const duracionReserva = reserva.duracion || 
-                               archivoEspejo.politicas?.duracion_estandar_min || 
-                               archivoEspejo.politicas?.duracion_reserva || 120;
-        const validacionHorario = validarHorarioReserva(nuevaFecha, nuevaHora, duracionReserva);
-        
-        if (!validacionHorario.valido) {
+        try {
+          // Usar la duración actual de la reserva o la duración por defecto
+          const duracionReserva = reserva.duracion || await obtenerDuracionReserva();
+          const validacionHorario = await validarHorarioReserva(nuevaFecha, nuevaHora, duracionReserva);
+          
+          if (!validacionHorario.valido) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              exito: false,
+              mensaje: validacionHorario.motivo,
+              horario_restaurante: validacionHorario.horario,
+              duracion_reserva: duracionReserva,
+              sugerencia: validacionHorario.sugerencia,
+              alternativa: validacionHorario.sugerencia ? {
+                fecha: validacionHorario.sugerencia.fecha || nuevaFecha,
+                hora: validacionHorario.sugerencia.hora,
+                mensaje: validacionHorario.sugerencia.mensaje
+              } : null
+            });
+          }
+        } catch (error) {
+          console.error('Error validando horario en modificar-reserva:', error);
           await client.query('ROLLBACK');
-          return res.status(400).json({
+          return res.status(500).json({
             exito: false,
-            mensaje: validacionHorario.motivo,
-            horario_restaurante: validacionHorario.horario,
-            duracion_reserva: duracionReserva,
-            sugerencia: validacionHorario.sugerencia,
-            alternativa: validacionHorario.sugerencia ? {
-              fecha: validacionHorario.sugerencia.fecha || nuevaFecha,
-              hora: validacionHorario.sugerencia.hora,
-              mensaje: validacionHorario.sugerencia.mensaje
-            } : null
+            mensaje: "Error al validar el nuevo horario"
           });
         }
       }
@@ -2683,6 +2798,9 @@ app.put('/api/admin/politicas', async (req, res) => {
   const politicas = req.body;
   
   try {
+    // Limpiar cache de políticas antes de la actualización
+    limpiarCacheHorarios();
+    
     const existe = await pool.query('SELECT id FROM politicas LIMIT 1');
     
     if (existe.rows.length > 0) {
@@ -2884,6 +3002,9 @@ app.get('/api/admin/horarios', async (req, res) => {
 // Actualizar horarios
 app.put('/api/admin/horarios', async (req, res) => {
   try {
+    // Limpiar cache de horarios antes de la actualización
+    limpiarCacheHorarios();
+    
     const { horarios } = req.body;
 
     if (!horarios || !Array.isArray(horarios)) {
@@ -2956,6 +3077,9 @@ app.put('/api/admin/horarios', async (req, res) => {
 // Actualizar horario de un día específico
 app.put('/api/admin/horarios/:dia', async (req, res) => {
   try {
+    // Limpiar cache de horarios antes de la actualización
+    limpiarCacheHorarios();
+    
     const dia = parseInt(req.params.dia);
     const horario = req.body;
 
