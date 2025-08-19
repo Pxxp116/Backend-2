@@ -1490,18 +1490,18 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
       
       res.json({
         exito: false,
-        mensaje: `No hay mesas para ${personas} personas el ${fecha} a las ${hora}`,
+        mensaje: `Lo siento, no tenemos disponibilidad para ${personas} personas el ${fecha} a las ${hora}. El restaurante está completo en ese horario.`,
         alternativas: alternativasQuery.rows,
         sugerencia: alternativasQuery.rows.length > 0 ? 
-          `Te sugiero ${alternativasQuery.rows[0].hora_alternativa} (${alternativasQuery.rows[0].mesas_disponibles} mesas disponibles)` : 
-          "No hay disponibilidad cercana. Prueba otro día."
+          `¿Te gustaría reservar a las ${alternativasQuery.rows[0].hora_alternativa}? Tenemos ${alternativasQuery.rows[0].mesas_disponibles} mesa(s) disponible(s)` : 
+          "No hay disponibilidad en horarios cercanos. ¿Te gustaría probar otro día?"
       });
     }
   } catch (error) {
     console.error('Error buscando mesa:', error);
     res.status(500).json({
       exito: false,
-      mensaje: "Error al buscar disponibilidad"
+      mensaje: "Lo siento, ha ocurrido un problema técnico al buscar disponibilidad. Por favor, inténtalo de nuevo en unos momentos."
     });
   }
 });
@@ -1587,7 +1587,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({
           exito: false,
-          mensaje: "No hay mesas disponibles para esa fecha y hora"
+          mensaje: "Lo siento, no tenemos mesas disponibles para esa fecha y hora. El restaurante está completo."
         });
       }
       
@@ -1684,7 +1684,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     console.error('Error creando reserva:', error);
     res.status(500).json({
       exito: false,
-      mensaje: "Error al crear la reserva. Por favor, intenta de nuevo."
+      mensaje: "Lo siento, ha ocurrido un problema al procesar tu reserva. Por favor, inténtalo de nuevo en unos momentos."
     });
   } finally {
     client.release();
