@@ -1078,13 +1078,24 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   const minutosApertura = horaApertura * 60 + minApertura;
   
   const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
-  const minutosCierre = horaCierre * 60 + minCierre;
+  // Manejar medianoche (00:00) como 1440 minutos (24:00)
+  const minutosCierre = horaCierre === 0 && minCierre === 0 ? 1440 : horaCierre * 60 + minCierre;
   
   // Calcular la hora en que terminaría la reserva
   const minutosFinReserva = minutosReserva + duracion;
   
   // La última hora válida es aquella donde la reserva termina antes del cierre
   const minutosUltimaReserva = minutosCierre - duracion;
+  
+  // Validar que hay tiempo suficiente en el día para hacer una reserva
+  if (minutosUltimaReserva < minutosApertura) {
+    return {
+      valido: false,
+      motivo: `No hay tiempo suficiente en el horario de apertura para una reserva de ${duracion} minutos`,
+      horario: horarioDia,
+      sugerencia: null
+    };
+  }
   
   if (minutosReserva < minutosApertura) {
     return {
