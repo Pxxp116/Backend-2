@@ -1449,42 +1449,36 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
         mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`
       });
     } else {
-      // Buscar alternativas cercanas
+      // Buscar alternativas simples en horarios comunes
       const alternativasQuery = await pool.query(`
-        WITH horarios_posibles AS (
-          SELECT 
-            to_char(hora_slot, 'HH24:MI') as hora_alternativa,
-            hora_slot,
-            COUNT(DISTINCT m.id) as mesas_disponibles
-          FROM (
-            SELECT generate_series(
-              $2::TIME - INTERVAL '90 minutes',
-              $2::TIME + INTERVAL '90 minutes',
-              INTERVAL '30 minutes'
-            ) as hora_slot
-          ) slots
-          CROSS JOIN mesas m
-          WHERE m.capacidad >= $1
-            AND m.capacidad <= $1 + 2
-            AND m.activa = true
-            AND NOT EXISTS (
-              SELECT 1 FROM reservas r
-              WHERE r.mesa_id = m.id
-                AND r.fecha = $3
-                AND r.estado IN ('confirmada', 'pendiente')
-                AND (
-                  r.hora < (hora_slot + $4 * INTERVAL '1 minute')
-                  AND
-                  hora_slot < (r.hora + r.duracion * INTERVAL '1 minute')
-                )
-            )
-          GROUP BY hora_slot
-          HAVING COUNT(DISTINCT m.id) > 0
-        )
-        SELECT hora_alternativa, mesas_disponibles
-        FROM horarios_posibles
-        WHERE hora_slot != $2::TIME
-        ORDER BY ABS(EXTRACT(EPOCH FROM (hora_slot - $2::TIME)))
+        SELECT 
+          to_char(h.hora_slot, 'HH24:MI') as hora_alternativa,
+          COUNT(DISTINCT m.id) as mesas_disponibles
+        FROM (
+          VALUES 
+            ('19:00'::TIME), ('19:30'::TIME), ('20:00'::TIME), 
+            ('20:30'::TIME), ('21:00'::TIME), ('22:00'::TIME),
+            ('22:30'::TIME)
+        ) AS h(hora_slot)
+        CROSS JOIN mesas m
+        WHERE m.capacidad >= $1
+          AND m.capacidad <= $1 + 2
+          AND m.activa = true
+          AND h.hora_slot != $2::TIME
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas r
+            WHERE r.mesa_id = m.id
+              AND r.fecha = $3
+              AND r.estado IN ('confirmada', 'pendiente')
+              AND (
+                r.hora < (h.hora_slot + $4 * INTERVAL '1 minute')
+                AND
+                h.hora_slot < (r.hora + r.duracion * INTERVAL '1 minute')
+              )
+          )
+        GROUP BY h.hora_slot
+        HAVING COUNT(DISTINCT m.id) > 0
+        ORDER BY h.hora_slot
         LIMIT 6
       `, [personas, hora, fecha, duracion]);
       
