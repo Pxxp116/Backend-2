@@ -947,7 +947,7 @@ function obtenerHorarioDia(fecha) {
 /**
  * Valida si una hora está dentro del horario de apertura
  * @param {string} fecha - Fecha en formato YYYY-MM-DD
- * @param {string} hora - Hora en formato HH:MM
+ * @param {string} hora - Hora en formato HH:MM o HH:MM:SS
  * @returns {object} Resultado de la validación
  */
 function validarHorarioReserva(fecha, hora) {
@@ -963,14 +963,21 @@ function validarHorarioReserva(fecha, hora) {
     };
   }
   
+  // Normalizar formato de hora (quitar segundos si los tiene)
+  hora = hora.substring(0, 5);
+  
   // Convertir horas a minutos para comparación
   const [horaReserva, minReserva] = hora.split(':').map(Number);
   const minutosReserva = horaReserva * 60 + minReserva;
   
-  const [horaApertura, minApertura] = (horarioDia.apertura || '00:00').split(':').map(Number);
+  // Normalizar horarios del restaurante (pueden venir con segundos)
+  const horaAperturaStr = (horarioDia.apertura || horarioDia.hora_apertura || '00:00').substring(0, 5);
+  const horaCierreStr = (horarioDia.cierre || horarioDia.hora_cierre || '23:59').substring(0, 5);
+  
+  const [horaApertura, minApertura] = horaAperturaStr.split(':').map(Number);
   const minutosApertura = horaApertura * 60 + minApertura;
   
-  const [horaCierre, minCierre] = (horarioDia.cierre || '23:59').split(':').map(Number);
+  const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
   const minutosCierre = horaCierre * 60 + minCierre;
   
   // Margen de 30 minutos antes del cierre para última reserva
@@ -979,11 +986,11 @@ function validarHorarioReserva(fecha, hora) {
   if (minutosReserva < minutosApertura) {
     return {
       valido: false,
-      motivo: `El restaurante abre a las ${horarioDia.apertura}`,
+      motivo: `El restaurante abre a las ${horaAperturaStr}`,
       horario: horarioDia,
       sugerencia: {
-        hora: horarioDia.apertura,
-        mensaje: `La hora más temprana disponible es ${horarioDia.apertura}`
+        hora: horaAperturaStr,
+        mensaje: `La hora más temprana disponible es ${horaAperturaStr}`
       }
     };
   }
@@ -1028,10 +1035,11 @@ function obtenerProximoDiaDisponible(fechaInicio) {
     const horario = obtenerHorarioDia(fechaStr);
     
     if (!horario.cerrado) {
+      const horaApertura = (horario.apertura || horario.hora_apertura || '13:00').substring(0, 5);
       return {
         fecha: fechaStr,
-        hora: horario.apertura,
-        mensaje: `El próximo día disponible es ${fechaStr} a partir de las ${horario.apertura}`
+        hora: horaApertura,
+        mensaje: `El próximo día disponible es ${fechaStr} a partir de las ${horaApertura}`
       };
     }
   }
