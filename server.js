@@ -1545,9 +1545,6 @@ app.delete('/api/cancelar-reserva/:id', verificarFrescura, async (req, res) => {
     // Eliminar la reserva completamente
     await pool.query('DELETE FROM reservas WHERE id = $1', [id]);
     
-    // Eliminar del historial de la mesa si existe
-    await pool.query('DELETE FROM historial_mesas WHERE reserva_id = $1', [id]);
-    
     // Registrar el cambio
     await registrarCambio('eliminar_reserva', id, 
       { estado: reserva.estado, nombre: reserva.nombre }, 
