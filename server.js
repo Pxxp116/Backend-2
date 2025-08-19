@@ -1312,9 +1312,9 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
               AND r.fecha = $2
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                (r.hora <= $3::TIME AND (r.hora + r.duracion * INTERVAL '1 minute') > $3::TIME)
-                OR
-                ($3::TIME <= r.hora AND ($3::TIME + INTERVAL '120 minutes') > r.hora)
+                (r.hora < ($3::TIME + INTERVAL '120 minutes'))
+                AND
+                (($3::TIME) < (r.hora + r.duracion * INTERVAL '1 minute'))
               )
           )
       `, [personas, fecha, hora]);
@@ -1432,9 +1432,9 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
             AND r.fecha = $2
             AND r.estado IN ('confirmada', 'pendiente')
             AND (
-              (r.hora <= $3::TIME AND (r.hora + r.duracion * INTERVAL '1 minute') > $3::TIME)
-              OR
-              ($3::TIME <= r.hora AND ($3::TIME + $4 * INTERVAL '1 minute') > r.hora)
+              (r.hora < ($3::TIME + $4 * INTERVAL '1 minute'))
+              AND
+              (($3::TIME) < (r.hora + r.duracion * INTERVAL '1 minute'))
             )
         )
       ORDER BY m.capacidad, m.numero_mesa
@@ -1473,9 +1473,9 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
                 AND r.fecha = $3
                 AND r.estado IN ('confirmada', 'pendiente')
                 AND (
-                  (r.hora <= hora_slot AND (r.hora + r.duracion * INTERVAL '1 minute') > hora_slot)
-                  OR
-                  (hora_slot <= r.hora AND (hora_slot + $4 * INTERVAL '1 minute') > r.hora)
+                  (r.hora < (hora_slot + $4 * INTERVAL '1 minute'))
+                  AND
+                  (hora_slot < (r.hora + r.duracion * INTERVAL '1 minute'))
                 )
             )
           GROUP BY hora_slot
@@ -1574,9 +1574,9 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
               AND r.fecha = $2
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                (r.hora <= $3::TIME AND (r.hora + r.duracion * INTERVAL '1 minute') > $3::TIME)
-                OR
-                ($3::TIME <= r.hora AND ($3::TIME + $4 * INTERVAL '1 minute') > r.hora)
+                (r.hora < ($3::TIME + $4 * INTERVAL '1 minute'))
+                AND
+                (($3::TIME) < (r.hora + r.duracion * INTERVAL '1 minute'))
               )
           )
         ORDER BY m.capacidad, m.numero_mesa
