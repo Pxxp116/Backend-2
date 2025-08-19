@@ -913,6 +913,132 @@ app.get('/api/espejo-gpt', (req, res) => {
   }
 });
 
+// ============================================
+// FUNCIONES DE VALIDACIÓN DE HORARIOS
+// ============================================
+
+/**
+ * Obtiene el horario para una fecha específica
+ * @param {string} fecha - Fecha en formato YYYY-MM-DD
+ * @returns {object} Horario del día
+ */
+function obtenerHorarioDia(fecha) {
+  // Buscar excepciones primero
+  const excepcion = archivoEspejo.horarios?.excepciones?.find(e => 
+    e.fecha === fecha
+  );
+  
+  if (excepcion) {
+    return {
+      ...excepcion,
+      es_excepcion: true
+    };
+  }
+  
+  // Si no hay excepción, buscar horario regular
+  const diaSemana = new Date(fecha).getDay();
+  const horarioRegular = archivoEspejo.horarios?.regular?.find(h => 
+    h.dia_semana === diaSemana
+  );
+  
+  return horarioRegular || { cerrado: true };
+}
+
+/**
+ * Valida si una hora está dentro del horario de apertura
+ * @param {string} fecha - Fecha en formato YYYY-MM-DD
+ * @param {string} hora - Hora en formato HH:MM
+ * @returns {object} Resultado de la validación
+ */
+function validarHorarioReserva(fecha, hora) {
+  const horarioDia = obtenerHorarioDia(fecha);
+  
+  // Si está cerrado ese día
+  if (horarioDia.cerrado) {
+    return {
+      valido: false,
+      motivo: horarioDia.motivo || "El restaurante está cerrado este día",
+      horario: null,
+      sugerencia: obtenerProximoDiaDisponible(fecha)
+    };
+  }
+  
+  // Convertir horas a minutos para comparación
+  const [horaReserva, minReserva] = hora.split(':').map(Number);
+  const minutosReserva = horaReserva * 60 + minReserva;
+  
+  const [horaApertura, minApertura] = (horarioDia.apertura || '00:00').split(':').map(Number);
+  const minutosApertura = horaApertura * 60 + minApertura;
+  
+  const [horaCierre, minCierre] = (horarioDia.cierre || '23:59').split(':').map(Number);
+  const minutosCierre = horaCierre * 60 + minCierre;
+  
+  // Margen de 30 minutos antes del cierre para última reserva
+  const minutosUltimaReserva = minutosCierre - 30;
+  
+  if (minutosReserva < minutosApertura) {
+    return {
+      valido: false,
+      motivo: `El restaurante abre a las ${horarioDia.apertura}`,
+      horario: horarioDia,
+      sugerencia: {
+        hora: horarioDia.apertura,
+        mensaje: `La hora más temprana disponible es ${horarioDia.apertura}`
+      }
+    };
+  }
+  
+  if (minutosReserva > minutosUltimaReserva) {
+    return {
+      valido: false,
+      motivo: `La última reserva se acepta 30 minutos antes del cierre (${formatearHora(minutosUltimaReserva)})`,
+      horario: horarioDia,
+      sugerencia: {
+        hora: formatearHora(minutosUltimaReserva),
+        mensaje: `La hora más tarde disponible es ${formatearHora(minutosUltimaReserva)}`
+      }
+    };
+  }
+  
+  return {
+    valido: true,
+    horario: horarioDia,
+    mensaje: "Horario válido para reserva"
+  };
+}
+
+/**
+ * Formatea minutos a formato HH:MM
+ */
+function formatearHora(minutos) {
+  const horas = Math.floor(minutos / 60);
+  const mins = minutos % 60;
+  return `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+}
+
+/**
+ * Obtiene el próximo día disponible después de una fecha
+ */
+function obtenerProximoDiaDisponible(fechaInicio) {
+  const fecha = new Date(fechaInicio);
+  
+  for (let i = 1; i <= 7; i++) {
+    fecha.setDate(fecha.getDate() + 1);
+    const fechaStr = fecha.toISOString().split('T')[0];
+    const horario = obtenerHorarioDia(fechaStr);
+    
+    if (!horario.cerrado) {
+      return {
+        fecha: fechaStr,
+        hora: horario.apertura,
+        mensaje: `El próximo día disponible es ${fechaStr} a partir de las ${horario.apertura}`
+      };
+    }
+  }
+  
+  return null;
+}
+
 // Consultar horario específico
 app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
   const { fecha } = req.query;
@@ -924,32 +1050,148 @@ app.get('/api/consultar-horario', verificarFrescura, (req, res) => {
     });
   }
   
-  // Buscar excepciones primero
-  const excepcion = archivoEspejo.horarios.excepciones?.find(e => 
-    e.fecha === fecha
-  );
-  
-  if (excepcion) {
-    return res.json({
-      exito: true,
-      horario: excepcion,
-      es_excepcion: true,
-      mensaje: excepcion.cerrado ? `Cerrado el ${fecha}: ${excepcion.motivo}` : `Horario especial el ${fecha}`
-    });
-  }
-  
-  // Si no hay excepción, devolver horario regular
-  const diaSemana = new Date(fecha).getDay();
-  const horarioRegular = archivoEspejo.horarios.regular?.find(h => 
-    h.dia_semana === diaSemana
-  );
+  const horario = obtenerHorarioDia(fecha);
   
   res.json({
     exito: true,
-    horario: horarioRegular || { cerrado: true },
-    es_excepcion: false,
-    mensaje: horarioRegular?.cerrado ? "Cerrado este día" : "Horario regular"
+    horario: horario,
+    es_excepcion: horario.es_excepcion || false,
+    mensaje: horario.cerrado ? 
+      `Cerrado el ${fecha}${horario.motivo ? ': ' + horario.motivo : ''}` : 
+      `Abierto de ${horario.apertura} a ${horario.cierre}`
   });
+});
+
+// Validar horario para reserva (NUEVO ENDPOINT)
+app.post('/api/validar-horario-reserva', verificarFrescura, (req, res) => {
+  const { fecha, hora } = req.body;
+  
+  if (!fecha || !hora) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Se requiere fecha y hora"
+    });
+  }
+  
+  const validacion = validarHorarioReserva(fecha, hora);
+  
+  if (validacion.valido) {
+    res.json({
+      exito: true,
+      valido: true,
+      mensaje: "Horario válido para reserva",
+      horario: validacion.horario,
+      detalles: {
+        apertura: validacion.horario.apertura,
+        cierre: validacion.horario.cierre,
+        ultima_reserva: formatearHora(
+          validacion.horario.cierre ? 
+          (parseInt(validacion.horario.cierre.split(':')[0]) * 60 + 
+           parseInt(validacion.horario.cierre.split(':')[1]) - 30) : 
+          1410 // 23:30 por defecto
+        )
+      }
+    });
+  } else {
+    res.json({
+      exito: false,
+      valido: false,
+      mensaje: validacion.motivo,
+      horario: validacion.horario,
+      sugerencia: validacion.sugerencia,
+      alternativa: validacion.sugerencia ? {
+        fecha: validacion.sugerencia.fecha || fecha,
+        hora: validacion.sugerencia.hora,
+        mensaje: validacion.sugerencia.mensaje
+      } : null
+    });
+  }
+});
+
+// Obtener horarios disponibles para una fecha (NUEVO ENDPOINT)
+app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
+  const { fecha, personas = 2 } = req.query;
+  
+  if (!fecha) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Se requiere una fecha"
+    });
+  }
+  
+  const horarioDia = obtenerHorarioDia(fecha);
+  
+  if (horarioDia.cerrado) {
+    const proximoDia = obtenerProximoDiaDisponible(fecha);
+    return res.json({
+      exito: false,
+      mensaje: `El restaurante está cerrado el ${fecha}`,
+      cerrado: true,
+      proximo_dia_disponible: proximoDia
+    });
+  }
+  
+  try {
+    // Generar slots de tiempo disponibles cada 30 minutos
+    const [horaApertura, minApertura] = horarioDia.apertura.split(':').map(Number);
+    const [horaCierre, minCierre] = horarioDia.cierre.split(':').map(Number);
+    const minutosApertura = horaApertura * 60 + minApertura;
+    const minutosCierre = horaCierre * 60 + minCierre - 30; // 30 min antes del cierre
+    
+    const slots = [];
+    for (let minutos = minutosApertura; minutos <= minutosCierre; minutos += 30) {
+      const hora = formatearHora(minutos);
+      
+      // Verificar disponibilidad de mesas para cada slot
+      const disponibilidad = await pool.query(`
+        SELECT COUNT(DISTINCT m.id) as mesas_disponibles
+        FROM mesas m
+        WHERE m.capacidad >= $1
+          AND m.capacidad <= $1 + 2
+          AND m.activa = true
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas r
+            WHERE r.mesa_id = m.id
+              AND r.fecha = $2
+              AND r.estado IN ('confirmada', 'pendiente')
+              AND (
+                (r.hora <= $3::TIME AND (r.hora + r.duracion * INTERVAL '1 minute') > $3::TIME)
+                OR
+                ($3::TIME <= r.hora AND ($3::TIME + INTERVAL '120 minutes') > r.hora)
+              )
+          )
+      `, [personas, fecha, hora]);
+      
+      if (disponibilidad.rows[0].mesas_disponibles > 0) {
+        slots.push({
+          hora: hora,
+          disponible: true,
+          mesas_disponibles: parseInt(disponibilidad.rows[0].mesas_disponibles)
+        });
+      }
+    }
+    
+    res.json({
+      exito: true,
+      fecha: fecha,
+      horario_restaurante: {
+        apertura: horarioDia.apertura,
+        cierre: horarioDia.cierre
+      },
+      slots_disponibles: slots,
+      total_slots: slots.length,
+      mensaje: slots.length > 0 ? 
+        `Hay ${slots.length} horarios disponibles para ${personas} personas` : 
+        "No hay disponibilidad para esta fecha"
+    });
+    
+  } catch (error) {
+    console.error('Error obteniendo horarios disponibles:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al obtener horarios disponibles"
+    });
+  }
 });
 
 // Ver menú con filtros opcionales
@@ -991,6 +1233,23 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
     return res.status(400).json({
       exito: false,
       mensaje: "Se requiere fecha, hora y número de personas"
+    });
+  }
+  
+  // VALIDAR HORARIO ANTES DE BUSCAR MESA
+  const validacionHorario = validarHorarioReserva(fecha, hora);
+  
+  if (!validacionHorario.valido) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: validacionHorario.motivo,
+      horario_restaurante: validacionHorario.horario,
+      sugerencia: validacionHorario.sugerencia,
+      alternativa: validacionHorario.sugerencia ? {
+        fecha: validacionHorario.sugerencia.fecha || fecha,
+        hora: validacionHorario.sugerencia.hora,
+        mensaje: validacionHorario.sugerencia.mensaje
+      } : null
     });
   }
   
@@ -1102,6 +1361,23 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     return res.status(400).json({
       exito: false,
       mensaje: "Faltan datos obligatorios: nombre, teléfono, fecha, hora y personas"
+    });
+  }
+  
+  // VALIDAR HORARIO ANTES DE CREAR LA RESERVA
+  const validacionHorario = validarHorarioReserva(fecha, hora);
+  
+  if (!validacionHorario.valido) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: validacionHorario.motivo,
+      horario_restaurante: validacionHorario.horario,
+      sugerencia: validacionHorario.sugerencia,
+      alternativa: validacionHorario.sugerencia ? {
+        fecha: validacionHorario.sugerencia.fecha || fecha,
+        hora: validacionHorario.sugerencia.hora,
+        mensaje: validacionHorario.sugerencia.mensaje
+      } : null
     });
   }
   
@@ -1276,6 +1552,26 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
       const nuevaFecha = fecha || reserva.fecha;
       const nuevaHora = hora || reserva.hora;
       const nuevasPersonas = personas || reserva.personas;
+      
+      // VALIDAR HORARIO SI CAMBIA FECHA U HORA
+      if (fecha || hora) {
+        const validacionHorario = validarHorarioReserva(nuevaFecha, nuevaHora);
+        
+        if (!validacionHorario.valido) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            exito: false,
+            mensaje: validacionHorario.motivo,
+            horario_restaurante: validacionHorario.horario,
+            sugerencia: validacionHorario.sugerencia,
+            alternativa: validacionHorario.sugerencia ? {
+              fecha: validacionHorario.sugerencia.fecha || nuevaFecha,
+              hora: validacionHorario.sugerencia.hora,
+              mensaje: validacionHorario.sugerencia.mensaje
+            } : null
+          });
+        }
+      }
       
       // Buscar nueva mesa si es necesario
       const mesaQuery = await client.query(`
