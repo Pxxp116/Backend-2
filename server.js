@@ -1443,6 +1443,80 @@ app.delete('/api/cancelar-reserva', verificarFrescura, async (req, res) => {
   }
 });
 
+// Cancelar reserva por ID (cambiar estado a cancelada - desde Dashboard)
+app.put('/api/cancelar-reserva/:id', verificarFrescura, async (req, res) => {
+  const { id } = req.params;
+  const { motivo = "Cancelado desde dashboard" } = req.body;
+  
+  try {
+    // Actualizar el estado de la reserva a cancelada
+    const resultado = await pool.query(
+      `UPDATE reservas 
+       SET estado = 'cancelada', 
+           motivo_cancelacion = $1,
+           fecha_actualizacion = NOW()
+       WHERE id = $2 AND estado != 'cancelada'
+       RETURNING *, (SELECT nombre FROM clientes WHERE id = cliente_id) as nombre_cliente`,
+      [motivo, id]
+    );
+    
+    if (resultado.rows.length === 0) {
+      // Verificar si existe pero ya está cancelada
+      const reservaExistente = await pool.query(
+        'SELECT estado FROM reservas WHERE id = $1',
+        [id]
+      );
+      
+      if (reservaExistente.rows.length === 0) {
+        return res.status(404).json({
+          exito: false,
+          mensaje: "Reserva no encontrada"
+        });
+      }
+      
+      if (reservaExistente.rows[0].estado === 'cancelada') {
+        return res.status(400).json({
+          exito: false,
+          mensaje: "La reserva ya está cancelada"
+        });
+      }
+    }
+    
+    const reservaCancelada = resultado.rows[0];
+    
+    // Registrar el cambio
+    await registrarCambio('cancelar_reserva', id, 
+      { estado: 'confirmada' }, 
+      { estado: 'cancelada', motivo }, 
+      'dashboard'
+    );
+    
+    // Actualizar archivo espejo
+    await actualizarArchivoEspejo();
+    await generarEspejo();
+    
+    res.json({
+      exito: true,
+      mensaje: `Reserva de ${reservaCancelada.nombre_cliente} cancelada correctamente`,
+      reserva_cancelada: {
+        id: reservaCancelada.id,
+        nombre: reservaCancelada.nombre_cliente,
+        fecha: reservaCancelada.fecha,
+        hora: reservaCancelada.hora,
+        estado: reservaCancelada.estado
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error cancelando reserva:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al cancelar la reserva",
+      error: error.message
+    });
+  }
+});
+
 // Eliminar reserva por ID (desde Dashboard)
 app.delete('/api/cancelar-reserva/:id', verificarFrescura, async (req, res) => {
   const { id } = req.params;
