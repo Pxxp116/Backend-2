@@ -1078,7 +1078,7 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   const minutosApertura = horaApertura * 60 + minApertura;
   
   const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
-  // Manejar medianoche (00:00) como 1440 minutos (24:00)
+  // HOTFIX: Manejar medianoche (00:00) como 1440 minutos (24:00) para evitar horas negativas
   const minutosCierre = horaCierre === 0 && minCierre === 0 ? 1440 : horaCierre * 60 + minCierre;
   
   // Calcular la hora en que terminaría la reserva
