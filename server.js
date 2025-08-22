@@ -1992,7 +1992,7 @@ app.post('/api/crear-reserva', async (req, res) => {
           AND r.fecha = $2
           AND (
             -- Verificar solapamiento temporal simple
-            $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+            $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
             AND
             r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
           )
@@ -2235,7 +2235,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
                 r.fecha = $2 
                 AND (
                   -- Solapamiento temporal: verificar intersección de horarios
-                  $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+                  $3::TIME < (r.hora + COALESCE(r.duracion, $5) * INTERVAL '1 minute')
                   AND
                   r.hora < ($3::TIME + $5 * INTERVAL '1 minute')
                 )
@@ -2248,7 +2248,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
                     -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
                     
                     -- Reserva existente está en curso ahora
-                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, $5) * INTERVAL '1 minute')
                     OR
                     -- Reserva existente empezará pronto (< 15 min)
                     (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
