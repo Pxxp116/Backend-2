@@ -1735,13 +1735,14 @@ app.post('/api/buscar-mesa', async (req, res) => {
       // Obtener horario del día para calcular alternativas válidas
       const horarioDia = await obtenerHorarioDia(fecha);
       const alternativas = [];
+      let calculoUltimaHora = null; // Declarar en scope más amplio
       
       if (!horarioDia.cerrado) {
         // Calcular última hora de entrada válida
         const horaApertura = (horarioDia.apertura || horarioDia.hora_apertura || '13:00').substring(0, 5);
         const horaCierre = (horarioDia.cierre || horarioDia.hora_cierre || '00:00').substring(0, 5);
         
-        const calculoUltimaHora = calcularUltimaHoraEntrada(horaApertura, horaCierre, duracionFinal);
+        calculoUltimaHora = calcularUltimaHoraEntrada(horaApertura, horaCierre, duracionFinal);
         
         if (calculoUltimaHora.es_valida) {
           // Generar horarios alternativos cada 30 minutos
@@ -1816,7 +1817,7 @@ app.post('/api/buscar-mesa', async (req, res) => {
         horario_restaurante: {
           apertura: horarioDia.apertura?.substring(0,5),
           cierre: horarioDia.cierre?.substring(0,5),
-          ultima_entrada_calculada: calculoUltimaHora.es_valida ? calculoUltimaHora.ultima_entrada : null
+          ultima_entrada_calculada: calculoUltimaHora?.es_valida ? calculoUltimaHora.ultima_entrada : null
         },
         sugerencia: alternativas.length > 0 ? 
           `¿Te gustaría reservar a las ${alternativas[0].hora_alternativa}? Tenemos ${alternativas[0].mesas_disponibles} mesa(s) disponible(s)` : 
