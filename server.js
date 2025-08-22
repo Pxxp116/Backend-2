@@ -1713,46 +1713,78 @@ app.post('/api/buscar-mesa', async (req, res) => {
         mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`
       });
     } else {
-      // Buscar alternativas simples en horarios comunes
-      const alternativasQuery = await pool.query(`
-        SELECT 
-          to_char(h.hora_slot, 'HH24:MI') as hora_alternativa,
-          COUNT(DISTINCT m.id) as mesas_disponibles
-        FROM (
-          VALUES 
-            ('19:00'::TIME), ('19:30'::TIME), ('20:00'::TIME), 
-            ('20:30'::TIME), ('21:00'::TIME), ('22:00'::TIME),
-            ('22:30'::TIME)
-        ) AS h(hora_slot)
-        CROSS JOIN mesas m
-        WHERE m.capacidad >= $1
-          AND m.capacidad <= $1 + 2
-          AND m.activa = true
-          AND h.hora_slot != $2::TIME
-          AND NOT EXISTS (
-            SELECT 1 FROM reservas r
-            WHERE r.mesa_id = m.id
-              AND r.fecha = $3
-              AND r.estado IN ('confirmada', 'pendiente')
-              AND (
-                -- Detectar solapamiento: horarios se intersectan
-                h.hora_slot < (r.hora + r.duracion * INTERVAL '1 minute')
-                AND
-                r.hora < (h.hora_slot + $4 * INTERVAL '1 minute')
-              )
-          )
-        GROUP BY h.hora_slot
-        HAVING COUNT(DISTINCT m.id) > 0
-        ORDER BY h.hora_slot
-        LIMIT 6
-      `, [personas, hora, fecha, duracionFinal]);
+      // BUSCAR ALTERNATIVAS INTELIGENTES usando validación de horarios
+      console.log(`🔍 [ALTERNATIVAS] No hay mesa para ${hora}, buscando alternativas...`);
+      
+      // Obtener horario del día para calcular alternativas válidas
+      const horarioDia = await obtenerHorarioDia(fecha);
+      const alternativas = [];
+      
+      if (!horarioDia.cerrado) {
+        // Calcular última hora de entrada válida
+        const horaApertura = (horarioDia.apertura || horarioDia.hora_apertura || '13:00').substring(0, 5);
+        const horaCierre = (horarioDia.cierre || horarioDia.hora_cierre || '00:00').substring(0, 5);
+        
+        const calculoUltimaHora = calcularUltimaHoraEntrada(horaApertura, horaCierre, duracionFinal);
+        
+        if (calculoUltimaHora.es_valida) {
+          // Generar horarios alternativos cada 30 minutos
+          const [horaIni, minIni] = horaApertura.split(':').map(Number);
+          const minutosApertura = horaIni * 60 + minIni;
+          const minutosUltimaEntrada = calculoUltimaHora.detalles.minutos_ultima_entrada;
+          
+          console.log(`   📊 Buscando desde ${horaApertura} hasta ${calculoUltimaHora.ultima_entrada}`);
+          
+          for (let minutos = minutosApertura; minutos <= minutosUltimaEntrada; minutos += 30) {
+            const horaAlternativa = formatearMinutosAHora(minutos);
+            
+            // Solo buscar si es diferente a la hora solicitada
+            if (horaAlternativa !== hora) {
+              // Verificar disponibilidad de mesas
+              const disponibilidad = await pool.query(`
+                SELECT COUNT(DISTINCT m.id) as mesas_disponibles
+                FROM mesas m
+                WHERE m.capacidad >= $1
+                  AND m.capacidad <= $1 + 2
+                  AND m.activa = true
+                  AND NOT EXISTS (
+                    SELECT 1 FROM reservas r
+                    WHERE r.mesa_id = m.id
+                      AND r.fecha = $2
+                      AND r.estado IN ('confirmada', 'pendiente')
+                      AND (
+                        $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
+                        AND
+                        r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
+                      )
+                  )
+              `, [personas, fecha, horaAlternativa, duracionFinal]);
+              
+              const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
+              if (mesasDisponibles > 0) {
+                alternativas.push({
+                  hora_alternativa: horaAlternativa,
+                  mesas_disponibles: mesasDisponibles
+                });
+              }
+            }
+          }
+        }
+      }
+      
+      console.log(`   📋 Encontradas ${alternativas.length} alternativas`);
       
       res.json({
         exito: false,
         mensaje: `Lo siento, no tenemos disponibilidad para ${personas} personas el ${fecha} a las ${hora}. El restaurante está completo en ese horario.`,
-        alternativas: alternativasQuery.rows,
-        sugerencia: alternativasQuery.rows.length > 0 ? 
-          `¿Te gustaría reservar a las ${alternativasQuery.rows[0].hora_alternativa}? Tenemos ${alternativasQuery.rows[0].mesas_disponibles} mesa(s) disponible(s)` : 
+        alternativas: alternativas,
+        horario_restaurante: {
+          apertura: horarioDia.apertura?.substring(0,5),
+          cierre: horarioDia.cierre?.substring(0,5),
+          ultima_entrada_calculada: calculoUltimaHora.es_valida ? calculoUltimaHora.ultima_entrada : null
+        },
+        sugerencia: alternativas.length > 0 ? 
+          `¿Te gustaría reservar a las ${alternativas[0].hora_alternativa}? Tenemos ${alternativas[0].mesas_disponibles} mesa(s) disponible(s)` : 
           "No hay disponibilidad en horarios cercanos. ¿Te gustaría probar otro día?"
       });
     }
