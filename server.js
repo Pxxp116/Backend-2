@@ -1692,28 +1692,34 @@ app.post('/api/buscar-mesa', async (req, res) => {
           WHERE r.mesa_id = m.id
             AND r.estado IN ('confirmada', 'pendiente')
             AND (
-              -- CASO 1: Misma fecha - verificar solapamientos normales
-              (r.fecha = $2 AND (
+              -- CASO 1: Misma fecha - verificar solapamientos básicos
+              r.fecha = $2 
+              AND (
+                -- Solapamiento temporal: verificar intersección de horarios
                 $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                 AND
                 r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-              ))
-              OR
-              -- CASO 2: Reservas activas HOY que podrían afectar
-              (r.fecha = CURRENT_DATE 
-                AND $2 = CURRENT_DATE
-                AND (
-                  -- Reserva está en curso ahora
+              )
+              AND (
+                -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
+                r.fecha > CURRENT_DATE
+                OR
+                -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
+                (r.fecha = CURRENT_DATE AND (
+                  -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
+                  
+                  -- Reserva existente está en curso ahora
                   NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                   OR
-                  -- Reserva empezará en los próximos 15 minutos 
+                  -- Reserva existente empezará pronto (< 15 min)
                   (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
                   OR
-                  -- Nueva reserva es muy pronto (próximos 15 min) y se solaparía
-                  ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes') AND
-                   $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute') AND
-                   r.hora < ($3::TIME + $4 * INTERVAL '1 minute'))
-                )
+                  -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
+                  ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
+                  OR
+                  -- Caso normal: simplemente hay solapamiento de horarios
+                  true  -- Ya verificado en la condición principal
+                ))
               )
             )
         )
@@ -1769,28 +1775,34 @@ app.post('/api/buscar-mesa', async (req, res) => {
                     WHERE r.mesa_id = m.id
                       AND r.estado IN ('confirmada', 'pendiente')
                       AND (
-                        -- CASO 1: Misma fecha - verificar solapamientos normales
-                        (r.fecha = $2 AND (
+                        -- CASO 1: Misma fecha - verificar solapamientos básicos
+                        r.fecha = $2 
+                        AND (
+                          -- Solapamiento temporal: verificar intersección de horarios
                           $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                           AND
                           r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-                        ))
-                        OR
-                        -- CASO 2: Reservas activas HOY que podrían afectar
-                        (r.fecha = CURRENT_DATE 
-                          AND $2 = CURRENT_DATE
-                          AND (
-                            -- Reserva está en curso ahora
+                        )
+                        AND (
+                          -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
+                          r.fecha > CURRENT_DATE
+                          OR
+                          -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
+                          (r.fecha = CURRENT_DATE AND (
+                            -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
+                            
+                            -- Reserva existente está en curso ahora
                             NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                             OR
-                            -- Reserva empezará en los próximos 15 minutos 
+                            -- Reserva existente empezará pronto (< 15 min)
                             (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
                             OR
-                            -- Nueva reserva es muy prono (próximos 15 min) y se solaparía
-                            ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes') AND
-                             $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute') AND
-                             r.hora < ($3::TIME + $4 * INTERVAL '1 minute'))
-                          )
+                            -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
+                            ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
+                            OR
+                            -- Caso normal: simplemente hay solapamiento de horarios
+                            true  -- Ya verificado en la condición principal
+                          ))
                         )
                       )
                   )
@@ -1902,6 +1914,47 @@ app.post('/api/crear-reserva', async (req, res) => {
     
     // Si no se proporciona mesa_id, buscar una automáticamente
     let mesaAsignada = mesa_id;
+    
+    // VALIDAR MESA ESPECÍFICA si se proporciona mesa_id
+    if (mesaAsignada) {
+      // Verificar que la mesa específica no tenga conflictos
+      console.log(`🔍 [VALIDAR MESA] Verificando mesa ${mesaAsignada} para ${fecha} ${hora} (${duracionFinal} min)`);
+      
+      const conflictoMesa = await client.query(`
+        SELECT r.codigo_reserva, r.hora, r.duracion, r.fecha
+        FROM reservas r
+        WHERE r.mesa_id = $1
+          AND r.estado IN ('confirmada', 'pendiente')
+          AND r.fecha = $2
+          AND (
+            -- Verificar solapamiento temporal simple
+            $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+            AND
+            r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
+          )
+      `, [mesaAsignada, fecha, hora, duracionFinal]);
+      
+      console.log(`🔍 [VALIDAR MESA] Conflictos encontrados: ${conflictoMesa.rows.length}`);
+      if (conflictoMesa.rows.length > 0) {
+        console.log(`🔍 [VALIDAR MESA] Primer conflicto:`, conflictoMesa.rows[0]);
+      }
+      
+      if (conflictoMesa.rows.length > 0) {
+        const reservaConflicto = conflictoMesa.rows[0];
+        const duracionConflicto = reservaConflicto.duracion || 90;
+        const horaFin = new Date(`1970-01-01 ${reservaConflicto.hora}`);
+        horaFin.setMinutes(horaFin.getMinutes() + duracionConflicto);
+        const horaFinStr = horaFin.toTimeString().substring(0, 5);
+        
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          exito: false,
+          mensaje: `La mesa solicitada ya está reservada para esa fecha y hora. Reserva existente: ${reservaConflicto.codigo_reserva} de ${reservaConflicto.hora} a ${horaFinStr}`,
+          codigo_conflicto: reservaConflicto.codigo_reserva
+        });
+      }
+    }
+    
     if (!mesaAsignada) {
       const mesaQuery = await client.query(`
         SELECT m.id FROM mesas m
@@ -1913,28 +1966,34 @@ app.post('/api/crear-reserva', async (req, res) => {
             WHERE r.mesa_id = m.id
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                -- CASO 1: Misma fecha - verificar solapamientos normales
-                (r.fecha = $2 AND (
+                -- CASO 1: Misma fecha - verificar solapamientos básicos
+                r.fecha = $2 
+                AND (
+                  -- Solapamiento temporal: verificar intersección de horarios
                   $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                   AND
                   r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-                ))
-                OR
-                -- CASO 2: Reservas activas HOY que podrían afectar
-                (r.fecha = CURRENT_DATE 
-                  AND $2 = CURRENT_DATE
-                  AND (
-                    -- Reserva está en curso ahora
+                )
+                AND (
+                  -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
+                  r.fecha > CURRENT_DATE
+                  OR
+                  -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
+                  (r.fecha = CURRENT_DATE AND (
+                    -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
+                    
+                    -- Reserva existente está en curso ahora
                     NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                     OR
-                    -- Reserva empezará en los próximos 15 minutos 
+                    -- Reserva existente empezará pronto (< 15 min)
                     (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
                     OR
-                    -- Nueva reserva es muy pronto (próximos 15 min) y se solaparía
-                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes') AND
-                     $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute') AND
-                     r.hora < ($3::TIME + $4 * INTERVAL '1 minute'))
-                  )
+                    -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
+                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
+                    OR
+                    -- Caso normal: simplemente hay solapamiento de horarios
+                    true  -- Ya verificado en la condición principal
+                  ))
                 )
               )
           )
@@ -2133,28 +2192,34 @@ app.put('/api/modificar-reserva', async (req, res) => {
               AND r.estado IN ('confirmada', 'pendiente')
               AND r.id != $4
               AND (
-                -- CASO 1: Misma fecha - verificar solapamientos normales
-                (r.fecha = $2 AND (
+                -- CASO 1: Misma fecha - verificar solapamientos básicos
+                r.fecha = $2 
+                AND (
+                  -- Solapamiento temporal: verificar intersección de horarios
                   $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                   AND
                   r.hora < ($3::TIME + $5 * INTERVAL '1 minute')
-                ))
-                OR
-                -- CASO 2: Reservas activas HOY que podrían afectar
-                (r.fecha = CURRENT_DATE 
-                  AND $2 = CURRENT_DATE
-                  AND (
-                    -- Reserva está en curso ahora
+                )
+                AND (
+                  -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
+                  r.fecha > CURRENT_DATE
+                  OR
+                  -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
+                  (r.fecha = CURRENT_DATE AND (
+                    -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
+                    
+                    -- Reserva existente está en curso ahora
                     NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
                     OR
-                    -- Reserva empezará en los próximos 15 minutos 
+                    -- Reserva existente empezará pronto (< 15 min)
                     (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
                     OR
-                    -- Nueva reserva es muy pronto (próximos 15 min) y se solaparía
-                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes') AND
-                     $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute') AND
-                     r.hora < ($3::TIME + $5 * INTERVAL '1 minute'))
-                  )
+                    -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
+                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
+                    OR
+                    -- Caso normal: simplemente hay solapamiento de horarios
+                    true  -- Ya verificado en la condición principal
+                  ))
                 )
               )
           )
