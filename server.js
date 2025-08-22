@@ -920,28 +920,14 @@ app.get('/api/espejo-gpt', (req, res) => {
 // FUNCIONES DE VALIDACIÓN DE HORARIOS CON CACHE
 // ============================================
 
-// Cache para horarios y políticas (se limpia cada 5 minutos)
-let cacheHorarios = {
-  data: null,
-  timestamp: 0,
-  TTL: 5 * 60 * 1000 // 5 minutos
-};
-
-let cachePoliticas = {
-  data: null,
-  timestamp: 0,
-  TTL: 5 * 60 * 1000 // 5 minutos
-};
+// ELIMINADO CACHE: No usar cache para garantizar datos siempre frescos
+// Los datos de configuración pueden cambiar en cualquier momento desde el Dashboard
 
 /**
- * Limpia el cache cuando hay cambios desde el dashboard
+ * Función vacía mantenida por compatibilidad
  */
 function limpiarCacheHorarios() {
-  cacheHorarios.data = null;
-  cacheHorarios.timestamp = 0;
-  cachePoliticas.data = null;
-  cachePoliticas.timestamp = 0;
-  console.log('🔄 Cache de horarios y políticas limpiado por cambios en dashboard');
+  // No hacer nada - ya no usamos cache
 }
 
 /**
@@ -1010,43 +996,45 @@ async function obtenerHorarioDia(fecha) {
  * @returns {Promise<number>} Duración en minutos
  */
 async function obtenerDuracionReserva() {
-  const now = Date.now();
-  
-  // Verificar si el cache es válido
-  if (cachePoliticas.data && (now - cachePoliticas.timestamp) < cachePoliticas.TTL) {
-    return cachePoliticas.data.tiempo_mesa_minutos || 
-           cachePoliticas.data.duracion_estandar_min || 
-           cachePoliticas.data.duracion_reserva || 120;
-  }
-  
   try {
+    // SIEMPRE consultar la base de datos para obtener valores frescos
     const query = await pool.query('SELECT * FROM politicas LIMIT 1');
     
-    // Actualizar cache
-    cachePoliticas.data = query.rows[0] || {};
-    cachePoliticas.timestamp = now;
-    
-    return query.rows[0]?.tiempo_mesa_minutos || 
-           query.rows[0]?.duracion_estandar_min || 
-           query.rows[0]?.duracion_reserva || 120;
+    if (query.rows.length > 0) {
+      const politicas = query.rows[0];
+      // Buscar el campo correcto de duración en orden de prioridad
+      const duracion = politicas.tiempo_mesa_minutos || 
+                      politicas.duracion_estandar_min || 
+                      politicas.duracion_reserva || 
+                      politicas.duracion_defecto ||
+                      120;
+      console.log(`✅ Duración obtenida de BD: ${duracion} minutos`);
+      return duracion;
+    }
+    // Si no hay políticas, usar valor por defecto
+    console.log('⚠️ No hay políticas en BD, usando duración por defecto: 120 minutos');
+    return 120;
   } catch (error) {
-    console.error('Error obteniendo duración:', error);
-    // Fallback al archivo espejo o valor por defecto
-    return archivoEspejo.politicas?.tiempo_mesa_minutos ||
-           archivoEspejo.politicas?.duracion_estandar_min || 
-           archivoEspejo.politicas?.duracion_reserva || 120;
+    console.error('Error obteniendo duración de reserva:', error);
+    // En caso de error, usar valor por defecto
+    return 120;
   }
 }
 
 /**
  * Valida si una hora está dentro del horario de apertura
+ * IMPORTANTE: Siempre usa datos dinámicos de la BD
  * @param {string} fecha - Fecha en formato YYYY-MM-DD
  * @param {string} hora - Hora en formato HH:MM o HH:MM:SS
  * @param {number} duracion - Duración de la reserva en minutos (opcional)
  * @returns {Promise<object>} Resultado de la validación
  */
 async function validarHorarioReserva(fecha, hora, duracion = null) {
+  // SIEMPRE obtener horario fresco de la BD
   const horarioDia = await obtenerHorarioDia(fecha);
+  
+  console.log(`🔍 Validando reserva para ${fecha} a las ${hora}`);
+  console.log(`   Horario del día: ${JSON.stringify(horarioDia)}`);
   
   // Si está cerrado ese día
   if (horarioDia.cerrado) {
@@ -1058,137 +1046,135 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     };
   }
   
-  // Obtener duración SIEMPRE de las políticas para asegurar valores dinámicos
+  // SIEMPRE obtener duración fresca de las políticas
   if (!duracion) {
     duracion = await obtenerDuracionReserva();
   }
+  console.log(`   Duración de reserva: ${duracion} minutos`);
   
   // Normalizar formato de hora (quitar segundos si los tiene)
   hora = hora.substring(0, 5);
   
-  // Convertir horas a minutos para comparación
-  const [horaReserva, minReserva] = hora.split(':').map(Number);
-  const minutosReserva = horaReserva * 60 + minReserva;
+  // Obtener horarios del restaurante
+  const horaAperturaStr = (horarioDia.apertura || horarioDia.hora_apertura || horarioDia.hora_inicio || '13:00').substring(0, 5);
+  const horaCierreStr = (horarioDia.cierre || horarioDia.hora_cierre || horarioDia.hora_fin || '00:00').substring(0, 5);
   
-  // Normalizar horarios del restaurante (pueden venir con segundos)
-  const horaAperturaStr = (horarioDia.apertura || horarioDia.hora_apertura || '00:00').substring(0, 5);
-  const horaCierreStr = (horarioDia.cierre || horarioDia.hora_cierre || '23:59').substring(0, 5);
+  console.log(`   Horario restaurante: ${horaAperturaStr} - ${horaCierreStr}`);
   
-  const [horaApertura, minApertura] = horaAperturaStr.split(':').map(Number);
-  const minutosApertura = horaApertura * 60 + minApertura;
+  // Convertir todo a minutos para facilitar cálculos
+  const [horaRes, minRes] = hora.split(':').map(Number);
+  const [horaAp, minAp] = horaAperturaStr.split(':').map(Number);
+  const [horaCi, minCi] = horaCierreStr.split(':').map(Number);
   
-  const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
+  const minutosReserva = horaRes * 60 + minRes;
+  const minutosApertura = horaAp * 60 + minAp;
+  let minutosCierre = horaCi * 60 + minCi;
   
-  // Calcular minutos de cierre considerando horarios que cruzan medianoche
-  let minutosCierre;
-  if (horaCierre < horaApertura || (horaCierre >= 0 && horaCierre <= 6 && horaApertura > 6)) {
-    // El cierre es después de medianoche (ej: apertura 13:00, cierre 02:00)
-    minutosCierre = 1440 + (horaCierre * 60 + minCierre);
-  } else {
-    // Cierre normal en el mismo día
-    minutosCierre = horaCierre * 60 + minCierre;
+  // Manejar horarios que cruzan medianoche
+  // Si cierre <= apertura, el restaurante cierra después de medianoche
+  if (minutosCierre <= minutosApertura) {
+    minutosCierre += 1440; // Añadir 24 horas
+    console.log(`   ⚠️ Horario cruza medianoche. Cierre ajustado a: ${minutosCierre} minutos`);
   }
   
-  // Ajustar minutos de la reserva si cruza medianoche
+  // Si la reserva es después de medianoche y el restaurante cierra después de medianoche
   let minutosReservaAjustados = minutosReserva;
-  
-  // Si el restaurante cierra después de medianoche
-  if (minutosCierre > 1440) {
-    // Si la reserva es después de medianoche pero antes del cierre
-    if (horaReserva >= 0 && horaReserva < horaApertura && horaReserva <= horaCierre) {
-      minutosReservaAjustados = 1440 + minutosReserva;
-    }
+  if (minutosReserva < minutosApertura && minutosCierre > 1440) {
+    // La reserva es después de medianoche
+    minutosReservaAjustados += 1440;
+    console.log(`   ⚠️ Reserva después de medianoche. Ajustada a: ${minutosReservaAjustados} minutos`);
   }
   
-  // Calcular la hora en que terminaría la reserva
-  const minutosFinReserva = minutosReservaAjustados + duracion;
+  // CÁLCULO CRÍTICO: Última hora válida de entrada
+  // La reserva debe TERMINAR antes o exactamente al cierre
+  const minutosUltimaEntrada = minutosCierre - duracion;
+  const horaUltimaEntrada = formatearMinutosAHora(minutosUltimaEntrada);
   
-  // Calcular la última hora válida para iniciar una reserva
-  // La reserva debe COMPLETARSE antes del cierre
-  const minutosUltimaReserva = minutosCierre - duracion;
+  console.log(`   📊 Cálculo última entrada:`);
+  console.log(`      Cierre: ${minutosCierre} min (${formatearMinutosAHora(minutosCierre)})`);
+  console.log(`      Duración: ${duracion} min`);
+  console.log(`      Última entrada: ${minutosUltimaEntrada} min (${horaUltimaEntrada})`);
   
-  // Validar que hay tiempo suficiente en el día para hacer una reserva
-  if (minutosUltimaReserva < minutosApertura) {
+  // Validación 1: Verificar si hay suficiente tiempo en el día
+  if (minutosUltimaEntrada < minutosApertura) {
     return {
       valido: false,
-      motivo: `No hay tiempo suficiente en el horario de apertura para una reserva de ${duracion} minutos`,
+      motivo: `El restaurante no tiene suficiente tiempo de apertura para una reserva de ${duracion} minutos`,
       horario: horarioDia,
-      sugerencia: null
+      ultima_hora_calculada: null,
+      detalles_calculo: {
+        apertura: horaAperturaStr,
+        cierre: horaCierreStr,
+        duracion_reserva: duracion,
+        tiempo_disponible: minutosCierre - minutosApertura
+      }
     };
   }
   
-  // Verificar si la reserva es antes de la apertura
+  // Validación 2: La reserva no puede ser antes de la apertura
   if (minutosReservaAjustados < minutosApertura) {
     return {
       valido: false,
       motivo: `El restaurante abre a las ${horaAperturaStr}`,
       horario: horarioDia,
+      ultima_hora_calculada: horaUltimaEntrada,
       sugerencia: {
         hora: horaAperturaStr,
-        mensaje: `La hora más temprana disponible es ${horaAperturaStr}`
+        mensaje: `Primera hora disponible: ${horaAperturaStr}`
       }
     };
   }
   
-  // Verificar si la reserva terminaría después del cierre
-  if (minutosFinReserva > minutosCierre) {
-    // Formatear correctamente la última hora disponible
-    let horaUltimaFormateada;
-    if (minutosUltimaReserva >= 1440) {
-      // Si es después de medianoche
-      const minutosAjustados = minutosUltimaReserva - 1440;
-      horaUltimaFormateada = formatearHora(minutosAjustados);
-    } else {
-      horaUltimaFormateada = formatearHora(minutosUltimaReserva);
-    }
-    
+  // Validación 3: La reserva no puede empezar después de la última hora de entrada
+  if (minutosReservaAjustados > minutosUltimaEntrada) {
     return {
       valido: false,
-      motivo: `La reserva de ${duracion} minutos terminaría después del cierre (${horaCierreStr}). La última hora disponible es ${horaUltimaFormateada}`,
+      motivo: `Con una duración de ${duracion} minutos, la última hora de entrada es ${horaUltimaEntrada}`,
       horario: horarioDia,
+      ultima_hora_calculada: horaUltimaEntrada,
       sugerencia: {
-        hora: horaUltimaFormateada,
-        mensaje: `La última hora disponible es ${horaUltimaFormateada} para que la reserva termine antes del cierre`
+        hora: horaUltimaEntrada,
+        mensaje: `La última hora disponible para entrar es ${horaUltimaEntrada} (cierre a las ${horaCierreStr})`
+      },
+      detalles_calculo: {
+        hora_solicitada: hora,
+        hora_cierre: horaCierreStr,
+        duracion_reserva: duracion,
+        ultima_entrada_valida: horaUltimaEntrada
       }
     };
   }
   
-  // Verificar que la hora de inicio no supere la última hora permitida
-  if (minutosReservaAjustados > minutosUltimaReserva) {
-    let horaUltimaFormateada;
-    if (minutosUltimaReserva >= 1440) {
-      const minutosAjustados = minutosUltimaReserva - 1440;
-      horaUltimaFormateada = formatearHora(minutosAjustados);
-    } else {
-      horaUltimaFormateada = formatearHora(minutosUltimaReserva);
-    }
-    
-    return {
-      valido: false,
-      motivo: `No hay tiempo suficiente para una reserva de ${duracion} minutos. La última hora disponible es ${horaUltimaFormateada}`,
-      horario: horarioDia,
-      sugerencia: {
-        hora: horaUltimaFormateada,
-        mensaje: `La última hora disponible es ${horaUltimaFormateada}`
-      }
-    };
-  }
-  
+  // Si llegamos aquí, la reserva es válida
+  console.log(`   ✅ Reserva válida`);
   return {
     valido: true,
     horario: horarioDia,
-    mensaje: "Horario válido para reserva"
+    ultima_hora_calculada: horaUltimaEntrada,
+    mensaje: "Horario válido para reserva",
+    detalles: {
+      hora_reserva: hora,
+      duracion: duracion,
+      hora_fin: formatearMinutosAHora(minutosReservaAjustados + duracion),
+      ultima_entrada_dia: horaUltimaEntrada
+    }
   };
 }
 
 /**
- * Formatea minutos a formato HH:MM
+ * Convierte minutos a formato HH:MM manejando días cruzados
  */
-function formatearHora(minutos) {
+function formatearMinutosAHora(minutos) {
+  // Si es más de 24 horas, ajustar
+  if (minutos >= 1440) {
+    minutos = minutos - 1440;
+  }
   const horas = Math.floor(minutos / 60);
   const mins = minutos % 60;
   return `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
 }
+
+// Eliminada función duplicada - usar formatearMinutosAHora en su lugar
 
 /**
  * Obtiene el próximo día disponible después de una fecha
@@ -1202,7 +1188,7 @@ async function obtenerProximoDiaDisponible(fechaInicio) {
     const horario = await obtenerHorarioDia(fechaStr);
     
     if (!horario.cerrado) {
-      const horaApertura = (horario.apertura || horario.hora_apertura || '13:00').substring(0, 5);
+      const horaApertura = (horario.apertura || horario.hora_apertura || horario.hora_inicio).substring(0, 5);
       return {
         fecha: fechaStr,
         hora: horaApertura,
@@ -1268,7 +1254,8 @@ app.post('/api/validar-horario-reserva', verificarFrescura, async (req, res) => 
         detalles: {
           apertura: (validacion.horario.apertura || validacion.horario.hora_apertura || '').substring(0,5),
           cierre: (validacion.horario.cierre || validacion.horario.hora_cierre || '').substring(0,5),
-          duracion_reserva: duracion || await obtenerDuracionReserva()
+          duracion_reserva: duracion || await obtenerDuracionReserva(),
+          ultima_hora_calculada: validacion.ultima_hora_calculada
         }
       });
     } else {
@@ -1347,10 +1334,10 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
                 -- Detectar solapamiento: horarios se intersectan
                 $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
                 AND
-                r.hora < ($3::TIME + INTERVAL '120 minutes')
+                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
               )
           )
-      `, [personas, fecha, hora]);
+      `, [personas, fecha, hora, duracionFinal]);
       
       if (disponibilidad.rows[0].mesas_disponibles > 0) {
         slots.push({
@@ -1416,7 +1403,8 @@ app.get('/api/ver-menu', verificarFrescura, (req, res) => {
 
 // Buscar mesa disponible (ENDPOINT CLAVE PARA RESERVAS)
 app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
-  const { fecha, hora, personas, duracion = 120 } = req.body;
+  // NO usar valor por defecto hardcodeado - obtener de políticas
+  const { fecha, hora, personas, duracion } = req.body;
   
   // Validación de entrada
   if (!fecha || !hora || !personas) {
@@ -1428,7 +1416,9 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
   
   // VALIDAR HORARIO ANTES DE BUSCAR MESA
   try {
-    const validacionHorario = await validarHorarioReserva(fecha, hora, duracion);
+    // Si no se proporciona duración, obtenerla de las políticas
+    const duracionFinal = duracion || await obtenerDuracionReserva();
+    const validacionHorario = await validarHorarioReserva(fecha, hora, duracionFinal);
     
     if (!validacionHorario.valido) {
       return res.status(400).json({
@@ -1476,7 +1466,7 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
         )
       ORDER BY m.capacidad, m.numero_mesa
       LIMIT 1
-    `, [personas, fecha, hora, duracion]);
+    `, [personas, fecha, hora, duracionFinal]);
     
     if (query.rows.length > 0) {
       const mesa = query.rows[0];
@@ -1518,7 +1508,7 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
         HAVING COUNT(DISTINCT m.id) > 0
         ORDER BY h.hora_slot
         LIMIT 6
-      `, [personas, hora, fecha, duracion]);
+      `, [personas, hora, fecha, duracionFinal]);
       
       res.json({
         exito: false,
@@ -1551,7 +1541,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
     notas, 
     alergias,
     celebracion,
-    duracion = 120 
+    duracion  // Sin valor por defecto - se obtiene de políticas
   } = req.body;
   
   // Validación completa
@@ -1564,7 +1554,9 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
   
   // VALIDAR HORARIO ANTES DE CREAR LA RESERVA
   try {
-    const validacionHorario = await validarHorarioReserva(fecha, hora, duracion);
+    // Si no se proporciona duración, obtenerla de las políticas
+    const duracionFinal = duracion || await obtenerDuracionReserva();
+    const validacionHorario = await validarHorarioReserva(fecha, hora, duracionFinal);
     
     if (!validacionHorario.valido) {
       return res.status(400).json({
@@ -1614,7 +1606,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
           )
         ORDER BY m.capacidad, m.numero_mesa
         LIMIT 1
-      `, [personas, fecha, hora, duracion]);
+      `, [personas, fecha, hora, duracionFinal]);
       
       if (mesaQuery.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -1685,7 +1677,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'confirmada', 'gpt', NOW())
       RETURNING *
     `, [codigoReserva, cliente_id, mesaAsignada, fecha, hora, personas, 
-        notas, alergias, celebracion, duracion]);
+        notas, alergias, celebracion, duracionFinal]);
     
     const reserva = reservaQuery.rows[0];
     
