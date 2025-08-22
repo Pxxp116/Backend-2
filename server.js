@@ -1088,8 +1088,14 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     minutosCierre = horaCierre * 60 + minCierre; // Mismo día
   }
   
+  // Ajustar minutos de la reserva si también es después de medianoche
+  let minutosReservaAjustados = minutosReserva;
+  if (horaReserva >= 0 && horaReserva <= 6 && horaCierre >= 0 && horaCierre <= 6) {
+    minutosReservaAjustados = 1440 + minutosReserva; // Ambos en día siguiente
+  }
+  
   // Calcular la hora en que terminaría la reserva
-  const minutosFinReserva = minutosReserva + duracion;
+  const minutosFinReserva = minutosReservaAjustados + duracion;
   
   // La última hora válida es aquella donde la reserva termina antes del cierre
   const minutosUltimaReserva = minutosCierre - duracion;
@@ -1104,7 +1110,7 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     };
   }
   
-  if (minutosReserva < minutosApertura) {
+  if (minutosReservaAjustados < minutosApertura) {
     return {
       valido: false,
       motivo: `El restaurante abre a las ${horaAperturaStr}`,
@@ -1130,7 +1136,7 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   }
   
   // Verificar que se pueda hacer reserva antes del cierre (redundancia de seguridad)
-  if (minutosReserva > minutosUltimaReserva) {
+  if (minutosReservaAjustados > minutosUltimaReserva) {
     return {
       valido: false,
       motivo: `No hay tiempo suficiente para una reserva de ${duracion} minutos. La última hora disponible es ${formatearHora(minutosUltimaReserva)}`,
