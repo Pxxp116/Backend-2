@@ -1650,10 +1650,11 @@ app.post('/api/buscar-mesa', async (req, res) => {
     });
   }
   
-  // VALIDAR HORARIO ANTES DE BUSCAR MESA
+  // OBTENER DURACIÓN Y VALIDAR HORARIO ANTES DE BUSCAR MESA
+  let duracionFinal;
   try {
     // Si no se proporciona duración, obtenerla de las políticas
-    const duracionFinal = duracion || await obtenerDuracionReserva();
+    duracionFinal = duracion || await obtenerDuracionReserva();
     const validacionHorario = await validarHorarioReserva(fecha, hora, duracionFinal);
     
     if (!validacionHorario.valido) {
@@ -1757,6 +1758,16 @@ app.post('/api/buscar-mesa', async (req, res) => {
     }
   } catch (error) {
     console.error('Error buscando mesa:', error);
+    
+    // Si es un error de validación de horario, devolver el mensaje específico
+    if (error.message && error.message.includes('validación')) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: error.message
+      });
+    }
+    
+    // Para otros errores, devolver mensaje genérico
     res.status(500).json({
       exito: false,
       mensaje: "Lo siento, ha ocurrido un problema técnico al buscar disponibilidad. Por favor, inténtalo de nuevo en unos momentos."
