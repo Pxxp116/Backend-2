@@ -1680,7 +1680,9 @@ app.post('/api/buscar-mesa', async (req, res) => {
   }
   
   try {
-    // Buscar mesas disponibles
+    // Buscar mesas disponibles con validación ESTRICTA de solapamientos
+    console.log(`🔍 [BUSCAR-MESA] Buscando mesa para ${fecha} ${hora} (${personas} personas, ${duracionFinal} min)`);
+    
     // IMPORTANTE: Verificar solapamientos + reservas activas + reservas próximas
     const query = await pool.query(`
       SELECT m.* FROM mesas m
@@ -1691,36 +1693,15 @@ app.post('/api/buscar-mesa', async (req, res) => {
           SELECT 1 FROM reservas r
           WHERE r.mesa_id = m.id
             AND r.estado IN ('confirmada', 'pendiente')
+            AND r.fecha = $2
             AND (
-              -- CASO 1: Misma fecha - verificar solapamientos básicos
-              r.fecha = $2 
-              AND (
-                -- Solapamiento temporal: verificar intersección de horarios
-                $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                AND
-                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-              )
-              AND (
-                -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
-                r.fecha > CURRENT_DATE
-                OR
-                -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
-                (r.fecha = CURRENT_DATE AND (
-                  -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
-                  
-                  -- Reserva existente está en curso ahora
-                  NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                  OR
-                  -- Reserva existente empezará pronto (< 15 min)
-                  (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
-                  OR
-                  -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
-                  ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
-                  OR
-                  -- Caso normal: simplemente hay solapamiento de horarios
-                  true  -- Ya verificado en la condición principal
-                ))
-              )
+              -- SOLAPAMIENTO SIMPLIFICADO: Dos reservas se solapan si sus rangos de tiempo se intersectan
+              -- Reserva A solapa con B si: (A_inicio < B_fin) Y (B_inicio < A_fin)
+              -- En nuestro caso: nueva reserva solapa con existente si:
+              -- (nueva_inicio < existente_fin) Y (existente_inicio < nueva_fin)
+              $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+              AND 
+              r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
             )
         )
       ORDER BY m.capacidad, m.numero_mesa
@@ -1735,13 +1716,46 @@ app.post('/api/buscar-mesa', async (req, res) => {
         mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`
       });
     } else {
-      // BUSCAR ALTERNATIVAS INTELIGENTES usando validación de horarios
-      console.log(`🔍 [ALTERNATIVAS] No hay mesa para ${hora}, buscando alternativas...`);
+      // BUSCAR ALTERNATIVAS INTELIGENTES con prioridad a horarios cercanos
+      console.log(`🔍 [ALTERNATIVAS] No hay mesa para ${hora}, buscando alternativas inteligentes...`);
+      
+      // Obtener información de conflictos para dar mejor feedback
+      const conflictosQuery = await pool.query(`
+        SELECT r.hora, r.duracion, r.codigo_reserva, m.numero_mesa
+        FROM reservas r
+        JOIN mesas m ON r.mesa_id = m.id
+        WHERE r.fecha = $1
+          AND r.estado IN ('confirmada', 'pendiente')
+          AND m.capacidad >= $2
+          AND m.capacidad <= $2 + 2
+        ORDER BY r.hora
+      `, [fecha, personas]);
+      
+      console.log(`   📊 Encontradas ${conflictosQuery.rows.length} reservas existentes para mesas compatibles`);
       
       // Obtener horario del día para calcular alternativas válidas
       const horarioDia = await obtenerHorarioDia(fecha);
       const alternativas = [];
-      let calculoUltimaHora = null; // Declarar en scope más amplio
+      let calculoUltimaHora = null;
+      let mensajeConflicto = "";
+      
+      // Analizar si hay conflicto directo con el horario solicitado
+      const [horaSol, minSol] = hora.split(':').map(Number);
+      const minutosSolicitados = horaSol * 60 + minSol;
+      const minutosFinSolicitados = minutosSolicitados + duracionFinal;
+      
+      for (const reserva of conflictosQuery.rows) {
+        const [horaRes, minRes] = reserva.hora.split(':').map(Number);
+        const minutosReserva = horaRes * 60 + minRes;
+        const minutosFinReserva = minutosReserva + (reserva.duracion || duracionFinal);
+        
+        // Verificar si hay solapamiento
+        if ((minutosSolicitados < minutosFinReserva && minutosFinSolicitados > minutosReserva)) {
+          mensajeConflicto = `Mesa ${reserva.numero_mesa} ocupada de ${reserva.hora} a ${formatearMinutosAHora(minutosFinReserva)}`;
+          console.log(`   ⚠️ Conflicto detectado: ${mensajeConflicto}`);
+          break;
+        }
+      }
       
       if (!horarioDia.cerrado) {
         // Calcular última hora de entrada válida
@@ -1751,19 +1765,20 @@ app.post('/api/buscar-mesa', async (req, res) => {
         calculoUltimaHora = calcularUltimaHoraEntrada(horaApertura, horaCierre, duracionFinal);
         
         if (calculoUltimaHora.es_valida) {
-          // Generar horarios alternativos cada 30 minutos
-          const [horaIni, minIni] = horaApertura.split(':').map(Number);
-          const minutosApertura = horaIni * 60 + minIni;
-          const minutosUltimaEntrada = calculoUltimaHora.detalles.minutos_ultima_entrada;
+          // ESTRATEGIA 1: Buscar horarios cercanos primero (±2 horas)
+          const rangoMinutos = 120; // 2 horas antes y después
+          const minutosDesde = Math.max(minutosSolicitados - rangoMinutos, horaApertura.split(':').map(Number).reduce((h,m) => h*60+m));
+          const minutosHasta = Math.min(minutosSolicitados + rangoMinutos, calculoUltimaHora.detalles.minutos_ultima_entrada);
           
-          console.log(`   📊 Buscando desde ${horaApertura} hasta ${calculoUltimaHora.ultima_entrada}`);
+          console.log(`   📊 Buscando alternativas cercanas (±2h): ${formatearMinutosAHora(minutosDesde)} - ${formatearMinutosAHora(minutosHasta)}`);
           
-          for (let minutos = minutosApertura; minutos <= minutosUltimaEntrada; minutos += 30) {
+          // Primero buscar horarios cercanos
+          for (let minutos = minutosDesde; minutos <= minutosHasta; minutos += 30) {
             const horaAlternativa = formatearMinutosAHora(minutos);
             
             // Solo buscar si es diferente a la hora solicitada
             if (horaAlternativa !== hora) {
-              // Verificar disponibilidad de mesas con lógica de tiempo real
+              // Verificar disponibilidad con la MISMA lógica estricta
               const disponibilidad = await pool.query(`
                 SELECT COUNT(DISTINCT m.id) as mesas_disponibles
                 FROM mesas m
@@ -1774,36 +1789,12 @@ app.post('/api/buscar-mesa', async (req, res) => {
                     SELECT 1 FROM reservas r
                     WHERE r.mesa_id = m.id
                       AND r.estado IN ('confirmada', 'pendiente')
+                      AND r.fecha = $2
                       AND (
-                        -- CASO 1: Misma fecha - verificar solapamientos básicos
-                        r.fecha = $2 
-                        AND (
-                          -- Solapamiento temporal: verificar intersección de horarios
-                          $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                          AND
-                          r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-                        )
-                        AND (
-                          -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
-                          r.fecha > CURRENT_DATE
-                          OR
-                          -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
-                          (r.fecha = CURRENT_DATE AND (
-                            -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
-                            
-                            -- Reserva existente está en curso ahora
-                            NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                            OR
-                            -- Reserva existente empezará pronto (< 15 min)
-                            (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
-                            OR
-                            -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
-                            ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
-                            OR
-                            -- Caso normal: simplemente hay solapamiento de horarios
-                            true  -- Ya verificado en la condición principal
-                          ))
-                        )
+                        -- SOLAPAMIENTO SIMPLIFICADO: Mismo criterio que búsqueda principal
+                        $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+                        AND 
+                        r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
                       )
                   )
               `, [personas, fecha, horaAlternativa, duracionFinal]);
@@ -1820,20 +1811,93 @@ app.post('/api/buscar-mesa', async (req, res) => {
         }
       }
       
-      console.log(`   📋 Encontradas ${alternativas.length} alternativas`);
+      // Si no se encontraron alternativas cercanas, buscar en todo el día
+      if (alternativas.length < 3 && calculoUltimaHora?.es_valida) {
+        console.log(`   📋 Pocas alternativas cercanas (${alternativas.length}), buscando en todo el día...`);
+        
+        const [horaAp, minAp] = horaApertura.split(':').map(Number);
+        const minutosApertura = horaAp * 60 + minAp;
+        
+        for (let minutos = minutosApertura; minutos <= calculoUltimaHora.detalles.minutos_ultima_entrada; minutos += 30) {
+          const horaAlternativa = formatearMinutosAHora(minutos);
+          
+          // Evitar duplicados y la hora original
+          if (horaAlternativa !== hora && !alternativas.some(a => a.hora_alternativa === horaAlternativa)) {
+            const disponibilidad = await pool.query(`
+              SELECT COUNT(DISTINCT m.id) as mesas_disponibles
+              FROM mesas m
+              WHERE m.capacidad >= $1
+                AND m.capacidad <= $1 + 2
+                AND m.activa = true
+                AND NOT EXISTS (
+                  SELECT 1 FROM reservas r
+                  WHERE r.mesa_id = m.id
+                    AND r.estado IN ('confirmada', 'pendiente')
+                    AND r.fecha = $2
+                    AND (
+                      -- SOLAPAMIENTO SIMPLIFICADO
+                      $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+                      AND 
+                      r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
+                    )
+                )
+            `, [personas, fecha, horaAlternativa, duracionFinal]);
+            
+            const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
+            if (mesasDisponibles > 0) {
+              alternativas.push({
+                hora_alternativa: horaAlternativa,
+                mesas_disponibles: mesasDisponibles,
+                diferencia_minutos: Math.abs(minutos - minutosSolicitados)
+              });
+              
+              if (alternativas.length >= 5) break; // Máximo 5 alternativas
+            }
+          }
+        }
+      }
+      
+      // Ordenar alternativas por cercanía a la hora solicitada
+      alternativas.sort((a, b) => (a.diferencia_minutos || 0) - (b.diferencia_minutos || 0));
+      
+      console.log(`   📋 Total alternativas encontradas: ${alternativas.length}`);
+      
+      // Construir mensaje más informativo
+      let mensajeRespuesta = `No hay disponibilidad para ${personas} personas el ${fecha} a las ${hora}`;
+      
+      if (mensajeConflicto) {
+        mensajeRespuesta += `. ${mensajeConflicto}`;
+      } else {
+        mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
+      }
+      
+      // Generar sugerencia más detallada
+      let sugerenciaTexto = "";
+      if (alternativas.length > 0) {
+        const primeraAlternativa = alternativas[0];
+        sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora_alternativa} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
+        
+        if (alternativas.length > 1) {
+          const otrasHoras = alternativas.slice(1, 4).map(a => a.hora_alternativa);
+          sugerenciaTexto += `. También hay disponibilidad a las: ${otrasHoras.join(', ')}`;
+        }
+      } else {
+        sugerenciaTexto = "No hay disponibilidad en este día. ¿Te gustaría probar otro día?";
+      }
       
       res.json({
         exito: false,
-        mensaje: `Lo siento, no tenemos disponibilidad para ${personas} personas el ${fecha} a las ${hora}. El restaurante está completo en ese horario.`,
-        alternativas: alternativas,
+        mensaje: mensajeRespuesta,
+        alternativas: alternativas.slice(0, 5), // Máximo 5 alternativas
         horario_restaurante: {
           apertura: horarioDia.apertura?.substring(0,5),
           cierre: horarioDia.cierre?.substring(0,5),
-          ultima_entrada_calculada: calculoUltimaHora?.es_valida ? calculoUltimaHora.ultima_entrada : null
+          ultima_entrada_calculada: calculoUltimaHora?.es_valida ? calculoUltimaHora.ultima_entrada : null,
+          duracion_reserva: duracionFinal
         },
-        sugerencia: alternativas.length > 0 ? 
-          `¿Te gustaría reservar a las ${alternativas[0].hora_alternativa}? Tenemos ${alternativas[0].mesas_disponibles} mesa(s) disponible(s)` : 
-          "No hay disponibilidad en horarios cercanos. ¿Te gustaría probar otro día?"
+        sugerencia: sugerenciaTexto,
+        conflicto_detectado: mensajeConflicto !== "",
+        detalles_conflicto: mensajeConflicto
       });
     }
   } catch (error) {
@@ -1965,38 +2029,13 @@ app.post('/api/crear-reserva', async (req, res) => {
             SELECT 1 FROM reservas r
             WHERE r.mesa_id = m.id
               AND r.estado IN ('confirmada', 'pendiente')
+              AND r.fecha = $2
               AND (
-                -- CASO 1: Misma fecha - verificar solapamientos básicos
-                r.fecha = $2 
-                AND (
-                  -- Solapamiento temporal: verificar intersección de horarios
-                  $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                  AND
-                  r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-                )
-                AND (
-                  -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
-                  r.fecha > CURRENT_DATE
-                  OR
-                  -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
-                  (r.fecha = CURRENT_DATE AND (
-                    -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
-                    
-                    -- Reserva existente está en curso ahora
-                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-                    OR
-                    -- Reserva existente empezará pronto (< 15 min)
-                    (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
-                    OR
-                    -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
-                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
-                    OR
-                    -- Caso normal: simplemente hay solapamiento de horarios
-                    true  -- Ya verificado en la condición principal
-                  ))
-                )
+                -- SOLAPAMIENTO SIMPLIFICADO: Idéntica a buscar-mesa
+                $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+                AND 
+                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
               )
-          )
         ORDER BY m.capacidad, m.numero_mesa
         LIMIT 1
       `, [personas, fecha, hora, duracionFinal]);
