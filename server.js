@@ -1799,10 +1799,11 @@ app.post('/api/crear-reserva', async (req, res) => {
     });
   }
   
-  // VALIDAR HORARIO ANTES DE CREAR LA RESERVA
+  // OBTENER DURACIÓN Y VALIDAR HORARIO ANTES DE CREAR LA RESERVA
+  let duracionFinal;
   try {
     // Si no se proporciona duración, obtenerla de las políticas
-    const duracionFinal = duracion || await obtenerDuracionReserva();
+    duracionFinal = duracion || await obtenerDuracionReserva();
     const validacionHorario = await validarHorarioReserva(fecha, hora, duracionFinal);
     
     if (!validacionHorario.valido) {
