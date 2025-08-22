@@ -1058,7 +1058,7 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     };
   }
   
-  // Obtener duración de las políticas si no se proporciona
+  // Obtener duración SIEMPRE de las políticas para asegurar valores dinámicos
   if (!duracion) {
     duracion = await obtenerDuracionReserva();
   }
@@ -1078,26 +1078,33 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   const minutosApertura = horaApertura * 60 + minApertura;
   
   const [horaCierre, minCierre] = horaCierreStr.split(':').map(Number);
-  // HOTFIX: Manejar horarios del día siguiente (00:00-06:00) como día siguiente
+  
+  // Calcular minutos de cierre considerando horarios que cruzan medianoche
   let minutosCierre;
-  if (horaCierre === 0 && minCierre === 0) {
-    minutosCierre = 1440; // Medianoche (24:00)
-  } else if (horaCierre >= 0 && horaCierre <= 6) {
-    minutosCierre = 1440 + horaCierre * 60 + minCierre; // Día siguiente
+  if (horaCierre < horaApertura || (horaCierre >= 0 && horaCierre <= 6 && horaApertura > 6)) {
+    // El cierre es después de medianoche (ej: apertura 13:00, cierre 02:00)
+    minutosCierre = 1440 + (horaCierre * 60 + minCierre);
   } else {
-    minutosCierre = horaCierre * 60 + minCierre; // Mismo día
+    // Cierre normal en el mismo día
+    minutosCierre = horaCierre * 60 + minCierre;
   }
   
-  // Ajustar minutos de la reserva si también es después de medianoche
+  // Ajustar minutos de la reserva si cruza medianoche
   let minutosReservaAjustados = minutosReserva;
-  if (horaReserva >= 0 && horaReserva <= 6 && horaCierre >= 0 && horaCierre <= 6) {
-    minutosReservaAjustados = 1440 + minutosReserva; // Ambos en día siguiente
+  
+  // Si el restaurante cierra después de medianoche
+  if (minutosCierre > 1440) {
+    // Si la reserva es después de medianoche pero antes del cierre
+    if (horaReserva >= 0 && horaReserva < horaApertura && horaReserva <= horaCierre) {
+      minutosReservaAjustados = 1440 + minutosReserva;
+    }
   }
   
   // Calcular la hora en que terminaría la reserva
   const minutosFinReserva = minutosReservaAjustados + duracion;
   
-  // La última hora válida es aquella donde la reserva termina antes del cierre
+  // Calcular la última hora válida para iniciar una reserva
+  // La reserva debe COMPLETARSE antes del cierre
   const minutosUltimaReserva = minutosCierre - duracion;
   
   // Validar que hay tiempo suficiente en el día para hacer una reserva
@@ -1110,6 +1117,7 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     };
   }
   
+  // Verificar si la reserva es antes de la apertura
   if (minutosReservaAjustados < minutosApertura) {
     return {
       valido: false,
@@ -1124,26 +1132,44 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   
   // Verificar si la reserva terminaría después del cierre
   if (minutosFinReserva > minutosCierre) {
+    // Formatear correctamente la última hora disponible
+    let horaUltimaFormateada;
+    if (minutosUltimaReserva >= 1440) {
+      // Si es después de medianoche
+      const minutosAjustados = minutosUltimaReserva - 1440;
+      horaUltimaFormateada = formatearHora(minutosAjustados);
+    } else {
+      horaUltimaFormateada = formatearHora(minutosUltimaReserva);
+    }
+    
     return {
       valido: false,
-      motivo: `La reserva terminaría después del cierre (${horaCierreStr}). Con ${duracion} minutos de duración, la última hora disponible es ${formatearHora(minutosUltimaReserva)}`,
+      motivo: `La reserva de ${duracion} minutos terminaría después del cierre (${horaCierreStr}). La última hora disponible es ${horaUltimaFormateada}`,
       horario: horarioDia,
       sugerencia: {
-        hora: formatearHora(minutosUltimaReserva),
-        mensaje: `La hora más tarde disponible es ${formatearHora(minutosUltimaReserva)} (reserva de ${duracion} minutos terminando a las ${horaCierreStr})`
+        hora: horaUltimaFormateada,
+        mensaje: `La última hora disponible es ${horaUltimaFormateada} para que la reserva termine antes del cierre`
       }
     };
   }
   
-  // Verificar que se pueda hacer reserva antes del cierre (redundancia de seguridad)
+  // Verificar que la hora de inicio no supere la última hora permitida
   if (minutosReservaAjustados > minutosUltimaReserva) {
+    let horaUltimaFormateada;
+    if (minutosUltimaReserva >= 1440) {
+      const minutosAjustados = minutosUltimaReserva - 1440;
+      horaUltimaFormateada = formatearHora(minutosAjustados);
+    } else {
+      horaUltimaFormateada = formatearHora(minutosUltimaReserva);
+    }
+    
     return {
       valido: false,
-      motivo: `No hay tiempo suficiente para una reserva de ${duracion} minutos. La última hora disponible es ${formatearHora(minutosUltimaReserva)}`,
+      motivo: `No hay tiempo suficiente para una reserva de ${duracion} minutos. La última hora disponible es ${horaUltimaFormateada}`,
       horario: horarioDia,
       sugerencia: {
-        hora: formatearHora(minutosUltimaReserva),
-        mensaje: `La hora más tarde disponible es ${formatearHora(minutosUltimaReserva)}`
+        hora: horaUltimaFormateada,
+        mensaje: `La última hora disponible es ${horaUltimaFormateada}`
       }
     };
   }
@@ -1318,9 +1344,10 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
               AND r.fecha = $2
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                r.hora < ($3::TIME + INTERVAL '120 minutes')
-                AND
+                -- Detectar solapamiento: horarios se intersectan
                 $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
+                AND
+                r.hora < ($3::TIME + INTERVAL '120 minutes')
               )
           )
       `, [personas, fecha, hora]);
@@ -1427,6 +1454,8 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
   
   try {
     // Buscar mesas disponibles
+    // IMPORTANTE: La lógica de solapamiento debe detectar CUALQUIER intersección entre intervalos
+    // Dos intervalos [A1, A2] y [B1, B2] se solapan si: A1 < B2 AND B1 < A2
     const query = await pool.query(`
       SELECT m.* FROM mesas m
       WHERE m.capacidad >= $1
@@ -1438,9 +1467,11 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
             AND r.fecha = $2
             AND r.estado IN ('confirmada', 'pendiente')
             AND (
-              r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-              AND
+              -- Detectar solapamiento: nueva reserva empieza antes de que termine la existente
+              -- Y la existente empieza antes de que termine la nueva
               $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
+              AND
+              r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
             )
         )
       ORDER BY m.capacidad, m.numero_mesa
@@ -1477,9 +1508,10 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
               AND r.fecha = $3
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                r.hora < (h.hora_slot + $4 * INTERVAL '1 minute')
-                AND
+                -- Detectar solapamiento: horarios se intersectan
                 h.hora_slot < (r.hora + r.duracion * INTERVAL '1 minute')
+                AND
+                r.hora < (h.hora_slot + $4 * INTERVAL '1 minute')
               )
           )
         GROUP BY h.hora_slot
@@ -1574,9 +1606,10 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
               AND r.fecha = $2
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
-                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-                AND
+                -- Detectar solapamiento: horarios se intersectan
                 $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
+                AND
+                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
               )
           )
         ORDER BY m.capacidad, m.numero_mesa
@@ -1761,6 +1794,9 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
       }
       
       // Buscar nueva mesa si es necesario
+      // Usar la duración actual de la reserva o la duración por defecto
+      const duracionReserva = reserva.duracion || await obtenerDuracionReserva();
+      
       const mesaQuery = await client.query(`
         SELECT m.id FROM mesas m
         WHERE m.capacidad >= $1
@@ -1769,13 +1805,18 @@ app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
             SELECT 1 FROM reservas r
             WHERE r.mesa_id = m.id
               AND r.fecha = $2
-              AND r.hora = $3::TIME
-              AND r.estado = 'confirmada'
+              AND r.estado IN ('confirmada', 'pendiente')
               AND r.id != $4
+              AND (
+                -- Detectar solapamiento con duración
+                $3::TIME < (r.hora + r.duracion * INTERVAL '1 minute')
+                AND
+                r.hora < ($3::TIME + $5 * INTERVAL '1 minute')
+              )
           )
         ORDER BY m.capacidad
         LIMIT 1
-      `, [nuevasPersonas, nuevaFecha, nuevaHora, reserva.id]);
+      `, [nuevasPersonas, nuevaFecha, nuevaHora, reserva.id, duracionReserva]);
       
       if (mesaQuery.rows.length === 0) {
         await client.query('ROLLBACK');
