@@ -1115,19 +1115,23 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   console.log(`      Cierre: ${minutosCierre} min (${formatearMinutosAHora(minutosCierre)})`);
   console.log(`      Duración: ${duracion} min`);
   console.log(`      Última entrada: ${minutosUltimaEntrada} min (${horaUltimaEntrada})`);
+  console.log(`      Horario cruza medianoche: ${minutosCierre > 1440 ? 'SÍ' : 'NO'}`);
   
   // Validación 1: Verificar si hay suficiente tiempo en el día
-  if (minutosUltimaEntrada < minutosApertura) {
+  // Para horarios que cruzan medianoche, necesitamos una lógica especial
+  const tiempoDisponible = minutosCierre - minutosApertura;
+  if (minutosUltimaEntrada < minutosApertura && tiempoDisponible < duracion) {
     return {
       valido: false,
-      motivo: `El restaurante no tiene suficiente tiempo de apertura para una reserva de ${duracion} minutos`,
+      motivo: `El restaurante no tiene suficiente tiempo de apertura para una reserva de ${duracion} minutos (disponible: ${tiempoDisponible} min)`,
       horario: horarioDia,
       ultima_hora_calculada: null,
       detalles_calculo: {
         apertura: horaAperturaStr,
         cierre: horaCierreStr,
         duracion_reserva: duracion,
-        tiempo_disponible: minutosCierre - minutosApertura
+        tiempo_disponible: tiempoDisponible,
+        cruza_medianoche: minutosCierre > 1440
       }
     };
   }
@@ -1186,10 +1190,16 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
  * Convierte minutos a formato HH:MM manejando días cruzados
  */
 function formatearMinutosAHora(minutos) {
-  // Si es más de 24 horas, ajustar
+  // Manejar valores negativos (última hora antes de medianoche del día anterior)
+  if (minutos < 0) {
+    minutos = 1440 + minutos; // Convertir a hora del día anterior
+  }
+  
+  // Si es más de 24 horas, ajustar al día siguiente
   if (minutos >= 1440) {
     minutos = minutos - 1440;
   }
+  
   const horas = Math.floor(minutos / 60);
   const mins = minutos % 60;
   return `${String(horas).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
