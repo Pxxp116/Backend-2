@@ -997,25 +997,43 @@ async function obtenerHorarioDia(fecha) {
  */
 async function obtenerDuracionReserva() {
   try {
+    console.log('🔍 [DEBUG] Obteniendo duración de reserva...');
+    
     // SIEMPRE consultar la base de datos para obtener valores frescos
     const query = await pool.query('SELECT * FROM politicas LIMIT 1');
     
+    console.log('📊 [DEBUG] Resultado de consulta políticas:', {
+      rowCount: query.rows.length,
+      data: query.rows[0] || 'No hay datos'
+    });
+    
     if (query.rows.length > 0) {
       const politicas = query.rows[0];
-      // Buscar el campo correcto de duración en orden de prioridad
-      const duracion = politicas.tiempo_mesa_minutos || 
-                      politicas.duracion_estandar_min || 
-                      politicas.duracion_reserva || 
-                      politicas.duracion_defecto ||
-                      120;
-      console.log(`✅ Duración obtenida de BD: ${duracion} minutos`);
+      
+      // Log de TODOS los campos para debugging
+      console.log('📋 [DEBUG] Campos disponibles en políticas:', Object.keys(politicas));
+      console.log('🔍 [DEBUG] Valores relacionados con duración:', {
+        tiempo_mesa_minutos: politicas.tiempo_mesa_minutos,
+        duracion_estandar_min: politicas.duracion_estandar_min,
+        duracion_reserva: politicas.duracion_reserva,
+        duracion_defecto: politicas.duracion_defecto
+      });
+      
+      // El campo correcto según la estructura de BD es tiempo_mesa_minutos
+      const duracion = politicas.tiempo_mesa_minutos || 120;
+      
+      console.log(`✅ [DEBUG] Duración final seleccionada: ${duracion} minutos`);
+      console.log(`📍 [DEBUG] Campo usado: tiempo_mesa_minutos = ${politicas.tiempo_mesa_minutos}`);
+      
       return duracion;
     }
+    
     // Si no hay políticas, usar valor por defecto
-    console.log('⚠️ No hay políticas en BD, usando duración por defecto: 120 minutos');
+    console.log('⚠️ [DEBUG] No hay políticas en BD, usando duración por defecto: 120 minutos');
     return 120;
+    
   } catch (error) {
-    console.error('Error obteniendo duración de reserva:', error);
+    console.error('❌ [DEBUG] Error obteniendo duración de reserva:', error);
     // En caso de error, usar valor por defecto
     return 120;
   }
@@ -1033,11 +1051,13 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
   // SIEMPRE obtener horario fresco de la BD
   const horarioDia = await obtenerHorarioDia(fecha);
   
-  console.log(`🔍 Validando reserva para ${fecha} a las ${hora}`);
-  console.log(`   Horario del día: ${JSON.stringify(horarioDia)}`);
+  console.log(`\n🔍 [VALIDAR] Validando reserva para ${fecha} a las ${hora}`);
+  console.log(`📋 [VALIDAR] Duración recibida como parámetro: ${duracion}`);
+  console.log(`🏪 [VALIDAR] Horario del día:`, JSON.stringify(horarioDia, null, 2));
   
   // Si está cerrado ese día
   if (horarioDia.cerrado) {
+    console.log(`❌ [VALIDAR] Restaurant cerrado`);
     return {
       valido: false,
       motivo: horarioDia.motivo || "El restaurante está cerrado este día",
@@ -1046,11 +1066,12 @@ async function validarHorarioReserva(fecha, hora, duracion = null) {
     };
   }
   
-  // SIEMPRE obtener duración fresca de las políticas
+  // CRÍTICO: SIEMPRE obtener duración fresca de las políticas
   if (!duracion) {
+    console.log(`⚠️ [VALIDAR] Sin duración especificada, obteniendo de políticas...`);
     duracion = await obtenerDuracionReserva();
   }
-  console.log(`   Duración de reserva: ${duracion} minutos`);
+  console.log(`📊 [VALIDAR] Duración FINAL a usar: ${duracion} minutos`);
   
   // Normalizar formato de hora (quitar segundos si los tiene)
   hora = hora.substring(0, 5);
@@ -1231,8 +1252,82 @@ app.get('/api/consultar-horario', verificarFrescura, async (req, res) => {
   }
 });
 
+// ENDPOINT DE DEBUG PARA DIAGNÓSTICO
+app.get('/api/debug/configuracion', async (req, res) => {
+  try {
+    console.log('\n🔬 [DEBUG-ENDPOINT] Iniciando diagnóstico de configuración...');
+    
+    // 1. Obtener políticas directamente
+    const politicasQuery = await pool.query('SELECT * FROM politicas');
+    console.log('📊 [DEBUG-ENDPOINT] Políticas en BD:', politicasQuery.rows);
+    
+    // 2. Obtener horarios
+    const horariosQuery = await pool.query('SELECT * FROM horarios ORDER BY dia_semana');
+    console.log('🕒 [DEBUG-ENDPOINT] Horarios en BD:', horariosQuery.rows);
+    
+    // 3. Probar función obtenerDuracionReserva
+    const duracionFunc = await obtenerDuracionReserva();
+    console.log('⚙️ [DEBUG-ENDPOINT] Resultado obtenerDuracionReserva():', duracionFunc);
+    
+    // 4. Probar horario de mañana
+    const mañana = new Date();
+    mañana.setDate(mañana.getDate() + 1);
+    const fechaMañana = mañana.toISOString().split('T')[0];
+    
+    const horarioMañana = await obtenerHorarioDia(fechaMañana);
+    console.log('📅 [DEBUG-ENDPOINT] Horario de mañana:', horarioMañana);
+    
+    // 5. Simular cálculo de última hora
+    if (!horarioMañana.cerrado && politicasQuery.rows.length > 0) {
+      const politicas = politicasQuery.rows[0];
+      const duracion = politicas.tiempo_mesa_minutos || 120;
+      
+      const cierreStr = horarioMañana.cierre || horarioMañana.hora_cierre || '00:00';
+      const [horaCierre, minCierre] = cierreStr.substring(0,5).split(':').map(Number);
+      let minutosCierre = horaCierre * 60 + minCierre;
+      
+      // Ajustar para horarios después de medianoche
+      if (minutosCierre <= 360) { // Si cierre es antes de las 6 AM, está en el día siguiente
+        minutosCierre += 1440;
+      }
+      
+      const minutosUltimaEntrada = minutosCierre - duracion;
+      const horasUltima = Math.floor(minutosUltimaEntrada / 60);
+      const minsUltima = minutosUltimaEntrada % 60;
+      const ultimaHora = `${String(horasUltima % 24).padStart(2,'0')}:${String(minsUltima).padStart(2,'0')}`;
+      
+      console.log('🧮 [DEBUG-ENDPOINT] Cálculo manual última hora:', {
+        cierre: cierreStr,
+        minutosCierre,
+        duracion,
+        minutosUltimaEntrada,
+        ultimaHora
+      });
+    }
+    
+    res.json({
+      exito: true,
+      debug: {
+        timestamp: new Date().toISOString(),
+        politicas: politicasQuery.rows,
+        horarios: horariosQuery.rows,
+        duracion_funcion: duracionFunc,
+        horario_mañana: horarioMañana,
+        fecha_prueba: fechaMañana
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ [DEBUG-ENDPOINT] Error:', error);
+    res.status(500).json({
+      exito: false,
+      error: error.message
+    });
+  }
+});
+
 // Validar horario para reserva (NUEVO ENDPOINT)
-app.post('/api/validar-horario-reserva', verificarFrescura, async (req, res) => {
+app.post('/api/validar-horario-reserva', async (req, res) => {
   const { fecha, hora, duracion } = req.body;
   
   if (!fecha || !hora) {
@@ -1402,7 +1497,7 @@ app.get('/api/ver-menu', verificarFrescura, (req, res) => {
 });
 
 // Buscar mesa disponible (ENDPOINT CLAVE PARA RESERVAS)
-app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
+app.post('/api/buscar-mesa', async (req, res) => {
   // NO usar valor por defecto hardcodeado - obtener de políticas
   const { fecha, hora, personas, duracion } = req.body;
   
@@ -1529,7 +1624,7 @@ app.post('/api/buscar-mesa', verificarFrescura, async (req, res) => {
 });
 
 // Crear reserva (ENDPOINT PRINCIPAL PARA RESERVAS)
-app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
+app.post('/api/crear-reserva', async (req, res) => {
   const { 
     nombre, 
     telefono, 
@@ -1701,7 +1796,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
       },
       codigo_reserva: codigoReserva,
       mensaje: `¡Reserva confirmada! Mesa ${mesaInfo.rows[0].numero_mesa} para ${personas} personas el ${fecha} a las ${hora}. Código: ${codigoReserva}`,
-      recordatorio: `Recuerda: Cancelaciones con ${archivoEspejo.politicas.cancelacion_horas || 24}h de antelación`
+      // Recordatorio removido - obtener dinámicamente si es necesario
     });
     
   } catch (error) {
@@ -1717,7 +1812,7 @@ app.post('/api/crear-reserva', verificarFrescura, async (req, res) => {
 });
 
 // Modificar reserva
-app.put('/api/modificar-reserva', verificarFrescura, async (req, res) => {
+app.put('/api/modificar-reserva', async (req, res) => {
   const { codigo_reserva, fecha, hora, personas, notas } = req.body;
   
   if (!codigo_reserva) {
