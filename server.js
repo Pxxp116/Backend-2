@@ -1932,7 +1932,8 @@ app.post('/api/crear-reserva', async (req, res) => {
     notas, 
     alergias,
     celebracion,
-    duracion  // Sin valor por defecto - se obtiene de políticas
+    duracion,  // Sin valor por defecto - se obtiene de políticas
+    origen  // Nuevo parámetro para identificar el origen de la reserva
   } = req.body;
   
   // Validación completa
@@ -2100,16 +2101,19 @@ app.post('/api/crear-reserva', async (req, res) => {
     // Generar código de reserva único
     const codigoReserva = Math.random().toString(36).substring(2, 10).toUpperCase();
     
+    // Validar y establecer origen (dashboard, gpt, admin, web)
+    const origenValido = ['dashboard', 'gpt', 'admin', 'web'].includes(origen) ? origen : 'web';
+    
     // Crear reserva
     const reservaQuery = await client.query(`
       INSERT INTO reservas (
         codigo_reserva, cliente_id, mesa_id, fecha, hora, personas, 
         notas, notas_alergias, celebracion, duracion, estado, origen, creada_en
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'confirmada', 'gpt', NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'confirmada', $11, NOW())
       RETURNING *
     `, [codigoReserva, cliente_id, mesaAsignada, fecha, hora, personas, 
-        notas, alergias, celebracion, duracionFinal]);
+        notas, alergias, celebracion, duracionFinal, origenValido]);
     
     const reserva = reservaQuery.rows[0];
     
@@ -2117,7 +2121,7 @@ app.post('/api/crear-reserva', async (req, res) => {
     const mesaInfo = await client.query('SELECT * FROM mesas WHERE id = $1', [mesaAsignada]);
     
     // Registrar cambio
-    await registrarCambio('crear_reserva', reserva.id, null, reserva, 'gpt');
+    await registrarCambio('crear_reserva', reserva.id, null, reserva, origenValido);
     
     await client.query('COMMIT');
     
