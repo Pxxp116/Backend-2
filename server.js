@@ -1778,7 +1778,17 @@ app.post('/api/buscar-mesa', async (req, res) => {
             
             // Solo buscar si es diferente a la hora solicitada
             if (horaAlternativa !== hora) {
-              // Verificar disponibilidad con la MISMA lógica estricta
+              // Para hoy, verificar que no sea una hora pasada
+              const ahora = new Date();
+              const fechaHoy = ahora.toISOString().split('T')[0];
+              if (fecha === fechaHoy) {
+                const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+                if (minutos <= horaActual + 30) { // Necesita al menos 30 min de anticipación
+                  continue;
+                }
+              }
+              
+              // Verificar disponibilidad con la MISMA lógica estricta + buffer
               const disponibilidad = await pool.query(`
                 SELECT COUNT(DISTINCT m.id) as mesas_disponibles
                 FROM mesas m
@@ -1791,20 +1801,25 @@ app.post('/api/buscar-mesa', async (req, res) => {
                       AND r.estado IN ('confirmada', 'pendiente')
                       AND r.fecha = $2
                       AND (
-                        -- SOLAPAMIENTO SIMPLIFICADO: Mismo criterio que búsqueda principal
-                        $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+                        -- SOLAPAMIENTO CON BUFFER: Agregar 15 minutos de margen
+                        -- La nueva reserva no debe empezar 15 min antes del fin de otra
+                        -- ni terminar 15 min después del inicio de otra
+                        $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute' + INTERVAL '15 minutes')
                         AND 
-                        r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
+                        (r.hora - INTERVAL '15 minutes') < ($3::TIME + $4 * INTERVAL '1 minute')
                       )
                   )
               `, [personas, fecha, horaAlternativa, duracionFinal]);
               
               const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
               if (mesasDisponibles > 0) {
+                console.log(`   ✅ Alternativa válida encontrada: ${horaAlternativa} (${mesasDisponibles} mesas)`);
                 alternativas.push({
                   hora_alternativa: horaAlternativa,
                   mesas_disponibles: mesasDisponibles
                 });
+              } else {
+                console.log(`   ❌ ${horaAlternativa}: Sin disponibilidad o conflicto detectado`);
               }
             }
           }
@@ -1818,7 +1833,16 @@ app.post('/api/buscar-mesa', async (req, res) => {
         const [horaAp, minAp] = horaApertura.split(':').map(Number);
         const minutosApertura = horaAp * 60 + minAp;
         
-        for (let minutos = minutosApertura; minutos <= calculoUltimaHora.detalles.minutos_ultima_entrada; minutos += 30) {
+        // Para reservas de hoy, calcular el mínimo tiempo desde ahora
+        const ahora = new Date();
+        const fechaHoy = ahora.toISOString().split('T')[0];
+        let minutosMinimos = minutosApertura;
+        if (fecha === fechaHoy) {
+          const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+          minutosMinimos = Math.max(minutosApertura, horaActual + 30); // Al menos 30 min desde ahora
+        }
+        
+        for (let minutos = minutosMinimos; minutos <= calculoUltimaHora.detalles.minutos_ultima_entrada; minutos += 30) {
           const horaAlternativa = formatearMinutosAHora(minutos);
           
           // Evitar duplicados y la hora original
@@ -1835,16 +1859,18 @@ app.post('/api/buscar-mesa', async (req, res) => {
                     AND r.estado IN ('confirmada', 'pendiente')
                     AND r.fecha = $2
                     AND (
-                      -- SOLAPAMIENTO SIMPLIFICADO
-                      $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
+                      -- SOLAPAMIENTO CON BUFFER: Mismo criterio que búsqueda cercana
+                      -- Incluye 15 minutos de buffer antes y después
+                      $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute' + INTERVAL '15 minutes')
                       AND 
-                      r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
+                      (r.hora - INTERVAL '15 minutes') < ($3::TIME + $4 * INTERVAL '1 minute')
                     )
                 )
             `, [personas, fecha, horaAlternativa, duracionFinal]);
             
             const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
             if (mesasDisponibles > 0) {
+              console.log(`   ✅ Alternativa del día encontrada: ${horaAlternativa} (${mesasDisponibles} mesas)`);
               alternativas.push({
                 hora_alternativa: horaAlternativa,
                 mesas_disponibles: mesasDisponibles,
