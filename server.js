@@ -11,6 +11,13 @@ const fs = require('fs').promises;
 const path = require('path');
 require('dotenv').config();
 
+// Importar sistema de validación centralizado
+const { 
+  verificarSolapamiento, 
+  buscarMesasDisponibles,
+  buscarHorariosAlternativos 
+} = require('./utils/validacion-reservas');
+
 const app = express();
 const PORT = process.env.PORT || 3002;
 
@@ -1642,6 +1649,8 @@ app.post('/api/buscar-mesa', async (req, res) => {
   // NO usar valor por defecto hardcodeado - obtener de políticas
   const { fecha, hora, personas, duracion } = req.body;
   
+  console.log(`\n🔍 [BUSCAR-MESA] Nueva búsqueda: ${fecha} ${hora} para ${personas} personas`);
+  
   // Validación de entrada
   if (!fecha || !hora || !personas) {
     return res.status(400).json({
@@ -1680,250 +1689,94 @@ app.post('/api/buscar-mesa', async (req, res) => {
   }
   
   try {
-    // Buscar mesas disponibles con validación ESTRICTA de solapamientos
-    console.log(`🔍 [BUSCAR-MESA] Buscando mesa para ${fecha} ${hora} (${personas} personas, ${duracionFinal} min)`);
+    // NUEVO: Usar sistema centralizado de validación
+    console.log(`🔍 [BUSCAR-MESA] Usando validación centralizada para ${fecha} ${hora}`);
     
-    // IMPORTANTE: Verificar solapamientos + reservas activas + reservas próximas
-    const query = await pool.query(`
-      SELECT m.* FROM mesas m
-      WHERE m.capacidad >= $1
-        AND m.capacidad <= $1 + 2  -- No asignar mesas demasiado grandes
-        AND m.activa = true
-        AND NOT EXISTS (
-          SELECT 1 FROM reservas r
-          WHERE r.mesa_id = m.id
-            AND r.estado IN ('confirmada', 'pendiente')
-            AND r.fecha = $2
-            AND (
-              -- SOLAPAMIENTO SIMPLIFICADO: Dos reservas se solapan si sus rangos de tiempo se intersectan
-              -- Reserva A solapa con B si: (A_inicio < B_fin) Y (B_inicio < A_fin)
-              -- En nuestro caso: nueva reserva solapa con existente si:
-              -- (nueva_inicio < existente_fin) Y (existente_inicio < nueva_fin)
-              $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
-              AND 
-              r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-            )
-        )
-      ORDER BY m.capacidad, m.numero_mesa
-      LIMIT 1
-    `, [personas, fecha, hora, duracionFinal]);
+    // Buscar mesas disponibles usando el nuevo sistema
+    const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal);
     
-    if (query.rows.length > 0) {
-      const mesa = query.rows[0];
+    if (mesasDisponibles.length > 0) {
+      const mesa = mesasDisponibles[0]; // Tomar la primera mesa disponible
+      
+      // Log especial si es mesa 3
+      if (mesa.id === 3) {
+        console.log(`✅ [MESA 3] Asignada correctamente sin conflictos`);
+      }
+      
+      // IMPORTANTE: Actualizar archivo espejo inmediatamente
+      console.log(`🔄 [SINCRONIZACIÓN] Actualizando archivo espejo...`);
+      actualizarArchivoEspejo().catch(err => 
+        console.error('Error actualizando archivo espejo:', err)
+      );
+      
       res.json({
         exito: true,
         mesa_disponible: mesa,
         mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`
       });
     } else {
-      // BUSCAR ALTERNATIVAS INTELIGENTES con prioridad a horarios cercanos
-      console.log(`🔍 [ALTERNATIVAS] No hay mesa para ${hora}, buscando alternativas inteligentes...`);
+      // BUSCAR ALTERNATIVAS USANDO SISTEMA CENTRALIZADO
+      console.log(`🔍 [ALTERNATIVAS] No hay mesa para ${hora}, buscando alternativas...`);
       
-      // Obtener información de conflictos para dar mejor feedback
-      const conflictosQuery = await pool.query(`
-        SELECT r.hora, r.duracion, r.codigo_reserva, m.numero_mesa
-        FROM reservas r
-        JOIN mesas m ON r.mesa_id = m.id
-        WHERE r.fecha = $1
-          AND r.estado IN ('confirmada', 'pendiente')
-          AND m.capacidad >= $2
-          AND m.capacidad <= $2 + 2
-        ORDER BY r.hora
-      `, [fecha, personas]);
-      
-      console.log(`   📊 Encontradas ${conflictosQuery.rows.length} reservas existentes para mesas compatibles`);
-      
-      // Obtener horario del día para calcular alternativas válidas
+      // Obtener horario del día
       const horarioDia = await obtenerHorarioDia(fecha);
-      const alternativas = [];
-      let calculoUltimaHora = null;
-      let mensajeConflicto = "";
       
-      // Analizar si hay conflicto directo con el horario solicitado
-      const [horaSol, minSol] = hora.split(':').map(Number);
-      const minutosSolicitados = horaSol * 60 + minSol;
-      const minutosFinSolicitados = minutosSolicitados + duracionFinal;
-      
-      for (const reserva of conflictosQuery.rows) {
-        const [horaRes, minRes] = reserva.hora.split(':').map(Number);
-        const minutosReserva = horaRes * 60 + minRes;
-        const minutosFinReserva = minutosReserva + (reserva.duracion || duracionFinal);
-        
-        // Verificar si hay solapamiento
-        if ((minutosSolicitados < minutosFinReserva && minutosFinSolicitados > minutosReserva)) {
-          mensajeConflicto = `Mesa ${reserva.numero_mesa} ocupada de ${reserva.hora} a ${formatearMinutosAHora(minutosFinReserva)}`;
-          console.log(`   ⚠️ Conflicto detectado: ${mensajeConflicto}`);
-          break;
-        }
+      if (horarioDia.cerrado) {
+        return res.json({
+          exito: false,
+          mensaje: `El restaurante está cerrado el ${fecha}`,
+          alternativas: [],
+          horario_restaurante: horarioDia
+        });
       }
       
-      if (!horarioDia.cerrado) {
-        // Calcular última hora de entrada válida
-        const horaApertura = (horarioDia.apertura || horarioDia.hora_apertura || '13:00').substring(0, 5);
-        const horaCierre = (horarioDia.cierre || horarioDia.hora_cierre || '00:00').substring(0, 5);
-        
-        calculoUltimaHora = calcularUltimaHoraEntrada(horaApertura, horaCierre, duracionFinal);
-        
-        if (calculoUltimaHora.es_valida) {
-          // ESTRATEGIA 1: Buscar horarios cercanos primero (±2 horas)
-          const rangoMinutos = 120; // 2 horas antes y después
-          const minutosDesde = Math.max(minutosSolicitados - rangoMinutos, horaApertura.split(':').map(Number).reduce((h,m) => h*60+m));
-          const minutosHasta = Math.min(minutosSolicitados + rangoMinutos, calculoUltimaHora.detalles.minutos_ultima_entrada);
-          
-          console.log(`   📊 Buscando alternativas cercanas (±2h): ${formatearMinutosAHora(minutosDesde)} - ${formatearMinutosAHora(minutosHasta)}`);
-          
-          // Primero buscar horarios cercanos
-          for (let minutos = minutosDesde; minutos <= minutosHasta; minutos += 30) {
-            const horaAlternativa = formatearMinutosAHora(minutos);
-            
-            // Solo buscar si es diferente a la hora solicitada
-            if (horaAlternativa !== hora) {
-              // Para hoy, verificar que no sea una hora pasada
-              const ahora = new Date();
-              const fechaHoy = ahora.toISOString().split('T')[0];
-              if (fecha === fechaHoy) {
-                const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
-                if (minutos <= horaActual + 30) { // Necesita al menos 30 min de anticipación
-                  continue;
-                }
-              }
-              
-              // Verificar disponibilidad con la MISMA lógica estricta + buffer
-              const disponibilidad = await pool.query(`
-                SELECT COUNT(DISTINCT m.id) as mesas_disponibles
-                FROM mesas m
-                WHERE m.capacidad >= $1
-                  AND m.capacidad <= $1 + 2
-                  AND m.activa = true
-                  AND NOT EXISTS (
-                    SELECT 1 FROM reservas r
-                    WHERE r.mesa_id = m.id
-                      AND r.estado IN ('confirmada', 'pendiente')
-                      AND r.fecha = $2
-                      AND (
-                        -- SOLAPAMIENTO CON BUFFER: Agregar 15 minutos de margen
-                        -- La nueva reserva no debe empezar 15 min antes del fin de otra
-                        -- ni terminar 15 min después del inicio de otra
-                        $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute' + INTERVAL '15 minutes')
-                        AND 
-                        (r.hora - INTERVAL '15 minutes') < ($3::TIME + $4 * INTERVAL '1 minute')
-                      )
-                  )
-              `, [personas, fecha, horaAlternativa, duracionFinal]);
-              
-              const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
-              if (mesasDisponibles > 0) {
-                console.log(`   ✅ Alternativa válida encontrada: ${horaAlternativa} (${mesasDisponibles} mesas)`);
-                alternativas.push({
-                  hora_alternativa: horaAlternativa,
-                  mesas_disponibles: mesasDisponibles
-                });
-              } else {
-                console.log(`   ❌ ${horaAlternativa}: Sin disponibilidad o conflicto detectado`);
-              }
-            }
-          }
-        }
-      }
+      // Buscar horarios alternativos usando el sistema centralizado
+      const alternativas = await buscarHorariosAlternativos(
+        pool, 
+        null, // No especificar mesa, buscar cualquiera
+        fecha, 
+        hora, 
+        personas, 
+        duracionFinal,
+        horarioDia
+      );
       
-      // Si no se encontraron alternativas cercanas, buscar en todo el día
-      if (alternativas.length < 3 && calculoUltimaHora?.es_valida) {
-        console.log(`   📋 Pocas alternativas cercanas (${alternativas.length}), buscando en todo el día...`);
-        
-        const [horaAp, minAp] = horaApertura.split(':').map(Number);
-        const minutosApertura = horaAp * 60 + minAp;
-        
-        // Para reservas de hoy, calcular el mínimo tiempo desde ahora
-        const ahora = new Date();
-        const fechaHoy = ahora.toISOString().split('T')[0];
-        let minutosMinimos = minutosApertura;
-        if (fecha === fechaHoy) {
-          const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
-          minutosMinimos = Math.max(minutosApertura, horaActual + 30); // Al menos 30 min desde ahora
-        }
-        
-        for (let minutos = minutosMinimos; minutos <= calculoUltimaHora.detalles.minutos_ultima_entrada; minutos += 30) {
-          const horaAlternativa = formatearMinutosAHora(minutos);
-          
-          // Evitar duplicados y la hora original
-          if (horaAlternativa !== hora && !alternativas.some(a => a.hora_alternativa === horaAlternativa)) {
-            const disponibilidad = await pool.query(`
-              SELECT COUNT(DISTINCT m.id) as mesas_disponibles
-              FROM mesas m
-              WHERE m.capacidad >= $1
-                AND m.capacidad <= $1 + 2
-                AND m.activa = true
-                AND NOT EXISTS (
-                  SELECT 1 FROM reservas r
-                  WHERE r.mesa_id = m.id
-                    AND r.estado IN ('confirmada', 'pendiente')
-                    AND r.fecha = $2
-                    AND (
-                      -- SOLAPAMIENTO CON BUFFER: Mismo criterio que búsqueda cercana
-                      -- Incluye 15 minutos de buffer antes y después
-                      $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute' + INTERVAL '15 minutes')
-                      AND 
-                      (r.hora - INTERVAL '15 minutes') < ($3::TIME + $4 * INTERVAL '1 minute')
-                    )
-                )
-            `, [personas, fecha, horaAlternativa, duracionFinal]);
-            
-            const mesasDisponibles = parseInt(disponibilidad.rows[0].mesas_disponibles);
-            if (mesasDisponibles > 0) {
-              console.log(`   ✅ Alternativa del día encontrada: ${horaAlternativa} (${mesasDisponibles} mesas)`);
-              alternativas.push({
-                hora_alternativa: horaAlternativa,
-                mesas_disponibles: mesasDisponibles,
-                diferencia_minutos: Math.abs(minutos - minutosSolicitados)
-              });
-              
-              if (alternativas.length >= 5) break; // Máximo 5 alternativas
-            }
-          }
-        }
-      }
-      
-      // Ordenar alternativas por cercanía a la hora solicitada
-      alternativas.sort((a, b) => (a.diferencia_minutos || 0) - (b.diferencia_minutos || 0));
-      
-      console.log(`   📋 Total alternativas encontradas: ${alternativas.length}`);
+      console.log(`   📊 Encontradas ${alternativas.length} alternativas sin conflictos`);
       
       // Construir mensaje más informativo
       let mensajeRespuesta = `No hay disponibilidad para ${personas} personas el ${fecha} a las ${hora}`;
-      
-      if (mensajeConflicto) {
-        mensajeRespuesta += `. ${mensajeConflicto}`;
-      } else {
-        mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
-      }
+      mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
       
       // Generar sugerencia más detallada
       let sugerenciaTexto = "";
       if (alternativas.length > 0) {
         const primeraAlternativa = alternativas[0];
-        sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora_alternativa} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
+        sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
         
         if (alternativas.length > 1) {
-          const otrasHoras = alternativas.slice(1, 4).map(a => a.hora_alternativa);
+          const otrasHoras = alternativas.slice(1, 4).map(a => a.hora);
           sugerenciaTexto += `. También hay disponibilidad a las: ${otrasHoras.join(', ')}`;
         }
       } else {
         sugerenciaTexto = "No hay disponibilidad en este día. ¿Te gustaría probar otro día?";
       }
       
+      // Formatear alternativas para la respuesta
+      const alternativasFormateadas = alternativas.map(a => ({
+        hora_alternativa: a.hora,
+        mesas_disponibles: a.mesas_disponibles
+      }));
+      
       res.json({
         exito: false,
         mensaje: mensajeRespuesta,
-        alternativas: alternativas.slice(0, 5), // Máximo 5 alternativas
+        alternativas: alternativasFormateadas,
         horario_restaurante: {
           apertura: horarioDia.apertura?.substring(0,5),
           cierre: horarioDia.cierre?.substring(0,5),
-          ultima_entrada_calculada: calculoUltimaHora?.es_valida ? calculoUltimaHora.ultima_entrada : null,
           duracion_reserva: duracionFinal
         },
-        sugerencia: sugerenciaTexto,
-        conflicto_detectado: mensajeConflicto !== "",
-        detalles_conflicto: mensajeConflicto
+        sugerencia: sugerenciaTexto
       });
     }
   } catch (error) {
@@ -2006,76 +1859,84 @@ app.post('/api/crear-reserva', async (req, res) => {
     // Si no se proporciona mesa_id, buscar una automáticamente
     let mesaAsignada = mesa_id;
     
-    // VALIDAR MESA ESPECÍFICA si se proporciona mesa_id
+    // NUEVO: VALIDAR MESA ESPECÍFICA usando sistema centralizado
     if (mesaAsignada) {
-      // Verificar que la mesa específica no tenga conflictos
-      console.log(`🔍 [VALIDAR MESA] Verificando mesa ${mesaAsignada} para ${fecha} ${hora} (${duracionFinal} min)`);
+      console.log(`🔍 [CREAR-RESERVA] Validando mesa ${mesaAsignada} con sistema centralizado`);
       
-      const conflictoMesa = await client.query(`
-        SELECT r.codigo_reserva, r.hora, r.duracion, r.fecha
-        FROM reservas r
-        WHERE r.mesa_id = $1
-          AND r.estado IN ('confirmada', 'pendiente')
-          AND r.fecha = $2
-          AND (
-            -- Verificar solapamiento temporal simple
-            $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
-            AND
-            r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-          )
-      `, [mesaAsignada, fecha, hora, duracionFinal]);
+      // Usar el sistema centralizado de validación
+      const validacion = await verificarSolapamiento(pool, mesaAsignada, fecha, hora, duracionFinal);
       
-      console.log(`🔍 [VALIDAR MESA] Conflictos encontrados: ${conflictoMesa.rows.length}`);
-      if (conflictoMesa.rows.length > 0) {
-        console.log(`🔍 [VALIDAR MESA] Primer conflicto:`, conflictoMesa.rows[0]);
+      // Log especial para mesa 3
+      if (mesaAsignada === 3) {
+        console.log(`🎯 [MESA 3 - CREAR-RESERVA] Resultado validación:`, validacion);
       }
       
-      if (conflictoMesa.rows.length > 0) {
-        const reservaConflicto = conflictoMesa.rows[0];
-        const duracionConflicto = reservaConflicto.duracion || 90;
-        const horaFin = new Date(`1970-01-01 ${reservaConflicto.hora}`);
-        horaFin.setMinutes(horaFin.getMinutes() + duracionConflicto);
-        const horaFinStr = horaFin.toTimeString().substring(0, 5);
-        
+      if (!validacion.valido) {
         await client.query('ROLLBACK');
+        
+        // Si hay conflictos, buscar alternativas
+        const alternativas = await buscarHorariosAlternativos(
+          pool, mesaAsignada, fecha, hora, personas, duracionFinal, 
+          await obtenerHorarioDia(fecha)
+        );
+        
+        let mensajeAlternativas = "";
+        if (alternativas.length > 0) {
+          mensajeAlternativas = ` Horarios disponibles: ${alternativas.slice(0, 3).map(a => a.hora).join(', ')}`;
+        }
+        
         return res.status(400).json({
           exito: false,
-          mensaje: `La mesa solicitada ya está reservada para esa fecha y hora. Reserva existente: ${reservaConflicto.codigo_reserva} de ${reservaConflicto.hora} a ${horaFinStr}`,
-          codigo_conflicto: reservaConflicto.codigo_reserva
+          mensaje: validacion.mensaje + mensajeAlternativas,
+          conflictos: validacion.conflictos,
+          alternativas: alternativas,
+          mesa_id: mesaAsignada,
+          es_mesa_3: validacion.es_mesa_3
         });
+      }
+      
+      // Si la validación pasó y es mesa 3, log de éxito
+      if (mesaAsignada === 3) {
+        console.log(`✅ [MESA 3] Validación exitosa - Sin conflictos detectados`);
       }
     }
     
+    // NUEVO: Buscar mesa disponible usando sistema centralizado
     if (!mesaAsignada) {
-      const mesaQuery = await client.query(`
-        SELECT m.id FROM mesas m
-        WHERE m.capacidad >= $1
-          AND m.capacidad <= $1 + 2
-          AND m.activa = true
-          AND NOT EXISTS (
-            SELECT 1 FROM reservas r
-            WHERE r.mesa_id = m.id
-              AND r.estado IN ('confirmada', 'pendiente')
-              AND r.fecha = $2
-              AND (
-                -- SOLAPAMIENTO SIMPLIFICADO: Idéntica a buscar-mesa
-                $3::TIME < (r.hora + COALESCE(r.duracion, $4) * INTERVAL '1 minute')
-                AND 
-                r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
-              )
-        ORDER BY m.capacidad, m.numero_mesa
-        LIMIT 1
-      `, [personas, fecha, hora, duracionFinal]);
+      console.log(`🔍 [CREAR-RESERVA] Buscando mesa disponible con sistema centralizado`);
       
-      if (mesaQuery.rows.length === 0) {
+      const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal);
+      
+      if (mesasDisponibles.length === 0) {
         await client.query('ROLLBACK');
+        
+        // Buscar horarios alternativos
+        const alternativas = await buscarHorariosAlternativos(
+          pool, null, fecha, hora, personas, duracionFinal,
+          await obtenerHorarioDia(fecha)
+        );
+        
+        let mensajeAlternativas = "";
+        if (alternativas.length > 0) {
+          mensajeAlternativas = ` Prueba a las: ${alternativas.slice(0, 3).map(a => a.hora).join(', ')}`;
+        }
+        
         return res.status(400).json({
           exito: false,
-          mensaje: "Lo siento, no tenemos mesas disponibles para esa fecha y hora. El restaurante está completo."
+          mensaje: `No hay mesas disponibles para ${personas} personas el ${fecha} a las ${hora}.${mensajeAlternativas}`,
+          alternativas: alternativas
         });
       }
       
-      mesaAsignada = mesaQuery.rows[0].id;
+      // Tomar la primera mesa disponible
+      mesaAsignada = mesasDisponibles[0].id;
+      
+      // Log especial si se asigna mesa 3
+      if (mesaAsignada === 3) {
+        console.log(`✅ [MESA 3] Asignada automáticamente - Validación pasó correctamente`);
+      }
+      
+      console.log(`✅ Mesa ${mesasDisponibles[0].numero_mesa} asignada automáticamente`);
     }
     
     // Crear o buscar cliente
@@ -3930,6 +3791,167 @@ async function inicializarDB() {
   }
 }
 
+// ============================================
+// ENDPOINTS DE DEBUG PARA SOLAPAMIENTOS
+// ============================================
+
+// Debug: Estado detallado de una mesa específica
+app.get('/api/debug/mesa/:id', async (req, res) => {
+  const mesaId = parseInt(req.params.id);
+  const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+  
+  console.log(`\n🐛 [DEBUG] Estado de mesa ${mesaId} para ${fecha}`);
+  
+  try {
+    // Información de la mesa
+    const mesaInfo = await pool.query('SELECT * FROM mesas WHERE id = $1', [mesaId]);
+    if (mesaInfo.rows.length === 0) {
+      return res.status(404).json({ error: `Mesa ${mesaId} no encontrada` });
+    }
+    
+    // Reservas para esta mesa en la fecha
+    const reservas = await pool.query(`
+      SELECT r.*, c.nombre, c.telefono
+      FROM reservas r
+      JOIN clientes c ON r.cliente_id = c.id
+      WHERE r.mesa_id = $1 
+        AND r.fecha = $2
+        AND r.estado IN ('confirmada', 'pendiente')
+      ORDER BY r.hora
+    `, [mesaId, fecha]);
+    
+    // Verificar si hay reserva en curso
+    const ahora = new Date();
+    const reservasEnCurso = await pool.query(`
+      SELECT r.*, c.nombre
+      FROM reservas r
+      JOIN clientes c ON r.cliente_id = c.id
+      WHERE r.mesa_id = $1
+        AND r.fecha = $2
+        AND r.estado = 'confirmada'
+        AND NOW()::TIME BETWEEN r.hora 
+        AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+    `, [mesaId, fecha]);
+    
+    // Log especial para mesa 3
+    if (mesaId === 3) {
+      console.log(`🎯 [MESA 3 DEBUG] Total reservas: ${reservas.rows.length}`);
+      console.log(`🎯 [MESA 3 DEBUG] En curso: ${reservasEnCurso.rows.length}`);
+    }
+    
+    res.json({
+      mesa: mesaInfo.rows[0],
+      fecha: fecha,
+      reservas_totales: reservas.rows.length,
+      reservas: reservas.rows.map(r => ({
+        codigo: r.codigo_reserva,
+        cliente: r.nombre,
+        telefono: r.telefono,
+        hora_inicio: r.hora,
+        duracion: r.duracion,
+        hora_fin: `${Math.floor((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) / 60)}:${String((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) % 60).padStart(2, '0')}`,
+        estado: r.estado,
+        origen: r.origen
+      })),
+      reservas_en_curso: reservasEnCurso.rows.length > 0 ? reservasEnCurso.rows[0] : null,
+      es_mesa_3: mesaId === 3
+    });
+    
+  } catch (error) {
+    console.error(`Error debugeando mesa ${mesaId}:`, error);
+    res.status(500).json({ error: 'Error interno' });
+  }
+});
+
+// Debug: Ver todas las reservas de una fecha
+app.get('/api/debug/reservas/:fecha', async (req, res) => {
+  const fecha = req.params.fecha;
+  
+  console.log(`\n🐛 [DEBUG] Reservas para ${fecha}`);
+  
+  try {
+    const reservas = await pool.query(`
+      SELECT 
+        r.*, 
+        c.nombre, 
+        c.telefono, 
+        m.numero_mesa,
+        m.capacidad,
+        m.zona
+      FROM reservas r
+      JOIN clientes c ON r.cliente_id = c.id
+      JOIN mesas m ON r.mesa_id = m.id
+      WHERE r.fecha = $1
+        AND r.estado IN ('confirmada', 'pendiente')
+      ORDER BY m.numero_mesa, r.hora
+    `, [fecha]);
+    
+    // Agrupar por mesa
+    const reservasPorMesa = {};
+    reservas.rows.forEach(r => {
+      if (!reservasPorMesa[r.mesa_id]) {
+        reservasPorMesa[r.mesa_id] = {
+          numero_mesa: r.numero_mesa,
+          capacidad: r.capacidad,
+          zona: r.zona,
+          reservas: []
+        };
+      }
+      
+      reservasPorMesa[r.mesa_id].reservas.push({
+        codigo: r.codigo_reserva,
+        cliente: r.nombre,
+        telefono: r.telefono,
+        hora_inicio: r.hora,
+        duracion: r.duracion,
+        hora_fin: `${Math.floor((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) / 60)}:${String((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) % 60).padStart(2, '0')}`,
+        estado: r.estado,
+        origen: r.origen
+      });
+    });
+    
+    // Detectar solapamientos
+    const solapamientos = [];
+    Object.keys(reservasPorMesa).forEach(mesaId => {
+      const mesa = reservasPorMesa[mesaId];
+      for (let i = 0; i < mesa.reservas.length - 1; i++) {
+        for (let j = i + 1; j < mesa.reservas.length; j++) {
+          const r1 = mesa.reservas[i];
+          const r2 = mesa.reservas[j];
+          
+          const inicio1 = parseInt(r1.hora_inicio.split(':')[0]) * 60 + parseInt(r1.hora_inicio.split(':')[1]);
+          const fin1 = inicio1 + (r1.duracion || 90);
+          const inicio2 = parseInt(r2.hora_inicio.split(':')[0]) * 60 + parseInt(r2.hora_inicio.split(':')[1]);
+          const fin2 = inicio2 + (r2.duracion || 90);
+          
+          if (inicio1 < fin2 && inicio2 < fin1) {
+            solapamientos.push({
+              mesa: mesa.numero_mesa,
+              reserva1: r1.codigo,
+              reserva2: r2.codigo,
+              horario1: `${r1.hora_inicio}-${r1.hora_fin}`,
+              horario2: `${r2.hora_inicio}-${r2.hora_fin}`
+            });
+          }
+        }
+      }
+    });
+    
+    res.json({
+      fecha: fecha,
+      total_reservas: reservas.rows.length,
+      mesas_con_reservas: Object.keys(reservasPorMesa).length,
+      reservas_por_mesa: reservasPorMesa,
+      solapamientos_detectados: solapamientos.length,
+      solapamientos: solapamientos
+    });
+    
+  } catch (error) {
+    console.error(`Error debugeando reservas ${fecha}:`, error);
+    res.status(500).json({ error: 'Error interno' });
+  }
+});
+
 // Arrancar servidor
 app.listen(PORT, async () => {
   console.log(`\n🚀 GastroBot Backend API iniciado`);
@@ -3942,6 +3964,8 @@ app.listen(PORT, async () => {
   console.log(`   - DEL  /api/cancelar-reserva        → Cancelar reserva`);
   console.log(`   - GET  /api/ver-menu                → Ver menú del restaurante`);
   console.log(`   - GET  /api/consultar-horario       → Consultar horarios`);
+  console.log(`   - GET  /api/debug/mesa/:id          → Debug estado de mesa específica`);
+  console.log(`   - GET  /api/debug/reservas/:fecha   → Debug reservas por fecha`);
   console.log(`   - GET  /api/admin/horarios          → Obtener horarios del restaurante`);
   console.log(`   - PUT  /api/admin/horarios          → Actualizar horarios del restaurante`);
   console.log(`   - PUT  /api/admin/horarios/:dia     → Actualizar horario de un día específico`);
