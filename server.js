@@ -1004,43 +1004,31 @@ async function obtenerHorarioDia(fecha) {
  */
 async function obtenerDuracionReserva() {
   try {
-    console.log('🔍 [DEBUG] Obteniendo duración de reserva...');
+    const timestamp = new Date().toISOString();
+    console.log(`🔍 [FRESH ${timestamp}] Consultando duración actualizada de BD...`);
     
-    // SIEMPRE consultar la base de datos para obtener valores frescos
+    // CRÍTICO: SIEMPRE consultar la base de datos para obtener valores frescos
+    // Nunca usar cache - cada consulta debe reflejar la configuración actual del Dashboard
     const query = await pool.query('SELECT * FROM politicas LIMIT 1');
-    
-    console.log('📊 [DEBUG] Resultado de consulta políticas:', {
-      rowCount: query.rows.length,
-      data: query.rows[0] || 'No hay datos'
-    });
     
     if (query.rows.length > 0) {
       const politicas = query.rows[0];
       
-      // Log de TODOS los campos para debugging
-      console.log('📋 [DEBUG] Campos disponibles en políticas:', Object.keys(politicas));
-      console.log('🔍 [DEBUG] Valores relacionados con duración:', {
-        tiempo_mesa_minutos: politicas.tiempo_mesa_minutos,
-        duracion_estandar_min: politicas.duracion_estandar_min,
-        duracion_reserva: politicas.duracion_reserva,
-        duracion_defecto: politicas.duracion_defecto
-      });
-      
       // El campo correcto según la estructura de BD es tiempo_mesa_minutos
       const duracion = politicas.tiempo_mesa_minutos || 120;
       
-      console.log(`✅ [DEBUG] Duración final seleccionada: ${duracion} minutos`);
-      console.log(`📍 [DEBUG] Campo usado: tiempo_mesa_minutos = ${politicas.tiempo_mesa_minutos}`);
+      console.log(`✅ [FRESH ${timestamp}] Duración obtenida de BD: ${duracion} minutos`);
+      console.log(`📍 [FRESH] tiempo_mesa_minutos actual = ${politicas.tiempo_mesa_minutos}`);
       
       return duracion;
     }
     
     // Si no hay políticas, usar valor por defecto
-    console.log('⚠️ [DEBUG] No hay políticas en BD, usando duración por defecto: 120 minutos');
+    console.log(`⚠️ [FRESH ${timestamp}] No hay políticas en BD, usando duración por defecto: 120 minutos`);
     return 120;
     
   } catch (error) {
-    console.error('❌ [DEBUG] Error obteniendo duración de reserva:', error);
+    console.error('❌ [FRESH] Error obteniendo duración de reserva:', error);
     // En caso de error, usar valor por defecto
     return 120;
   }

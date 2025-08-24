@@ -56,6 +56,9 @@ function formatearMinutos(minutos) {
  * @returns {Promise<{valido: boolean, conflictos: Array, mensaje: string}>}
  */
 async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reservaIdExcluir = null, duracionPorDefecto = 120) {
+  // CRÍTICO: Asegurar que duracionPorDefecto sea siempre el valor actual de BD
+  const timestamp = new Date().toISOString();
+  console.log(`🔍 [SOLAPAMIENTO ${timestamp}] Verificando con duración: ${duracion}, defecto: ${duracionPorDefecto}`);
   const esMesa3 = mesaId === 3;
   
   if (esMesa3) {
@@ -224,7 +227,9 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
  */
 async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, duracionPorDefecto = 120) {
   try {
-    console.log(`\n🔍 [BUSCAR MESAS] Buscando para ${fecha} ${hora} (${personas} personas, ${duracion} min)`);
+    const timestamp = new Date().toISOString();
+    console.log(`\n🔍 [BUSCAR MESAS ${timestamp}] Buscando para ${fecha} ${hora} (${personas} personas, ${duracion} min)`);
+    console.log(`📊 [BUSCAR MESAS] Usando duracionPorDefecto ACTUALIZADA: ${duracionPorDefecto} min`);
     
     // Primero obtener todas las mesas candidatas
     const mesasCandidatas = await pool.query(`
@@ -287,6 +292,10 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, dur
  */
 async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, personas, duracion, horarioRestaurante, duracionPorDefecto = 120) {
   try {
+    const timestamp = new Date().toISOString();
+    console.log(`\n🔍 [ALTERNATIVAS ${timestamp}] Iniciando búsqueda de horarios alternativos`);
+    console.log(`📊 [ALTERNATIVAS] Usando duracionPorDefecto ACTUALIZADA: ${duracionPorDefecto} min`);
+    
     const alternativas = [];
     const [horaOrig, minOrig] = horaOriginal.split(':').map(Number);
     const minutosOriginal = horaOrig * 60 + minOrig;
@@ -296,7 +305,7 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
     const desde = Math.max(minutosOriginal - rangoMinutos, 8 * 60); // No antes de las 8:00
     const hasta = Math.min(minutosOriginal + rangoMinutos, 23 * 60); // No después de las 23:00
     
-    console.log(`\n🔍 [ALTERNATIVAS] Buscando horarios alternativos ${formatearMinutos(desde)}-${formatearMinutos(hasta)}`);
+    console.log(`🔍 [ALTERNATIVAS] Buscando horarios alternativos ${formatearMinutos(desde)}-${formatearMinutos(hasta)}`);
     
     // Verificar cada slot de 30 minutos
     for (let minutos = desde; minutos <= hasta; minutos += 30) {
