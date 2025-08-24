@@ -52,9 +52,10 @@ function formatearMinutos(minutos) {
  * @param {string} hora - Hora de inicio (HH:MM)
  * @param {number} duracion - Duración en minutos
  * @param {string} reservaIdExcluir - ID de reserva a excluir (para modificaciones)
+ * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada en la reserva
  * @returns {Promise<{valido: boolean, conflictos: Array, mensaje: string}>}
  */
-async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reservaIdExcluir = null) {
+async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reservaIdExcluir = null, duracionPorDefecto = 120) {
   const esMesa3 = mesaId === 3;
   
   if (esMesa3) {
@@ -71,7 +72,7 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
         r.id,
         r.codigo_reserva,
         r.hora,
-        COALESCE(r.duracion, 90) as duracion,
+        COALESCE(r.duracion, $3) as duracion,
         r.estado,
         c.nombre as cliente_nombre,
         r.origen
@@ -82,11 +83,11 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
         AND r.estado IN ('confirmada', 'pendiente')
     `;
     
-    const params = [mesaId, fecha];
+    const params = [mesaId, fecha, duracionPorDefecto];
     
     // Si hay una reserva a excluir (modificación)
     if (reservaIdExcluir) {
-      query += ` AND r.id != $3`;
+      query += ` AND r.id != $4`;
       params.push(reservaIdExcluir);
     }
     
@@ -137,14 +138,14 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
         SELECT 
           r.codigo_reserva,
           r.hora,
-          COALESCE(r.duracion, 90) as duracion
+          COALESCE(r.duracion, $3) as duracion
         FROM reservas r
         WHERE r.mesa_id = $1
           AND r.fecha = $2
           AND r.estado = 'confirmada'
           AND NOW()::TIME BETWEEN r.hora 
-          AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
-      `, [mesaId, fecha]);
+          AND (r.hora + COALESCE(r.duracion, $3) * INTERVAL '1 minute')
+      `, [mesaId, fecha, duracionPorDefecto]);
       
       if (reservasEnCurso.rows.length > 0) {
         const reservaActiva = reservasEnCurso.rows[0];
@@ -218,9 +219,10 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
  * @param {string} hora - Hora de inicio
  * @param {number} personas - Número de personas
  * @param {number} duracion - Duración en minutos
+ * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada
  * @returns {Promise<Array>} Lista de mesas disponibles
  */
-async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion) {
+async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, duracionPorDefecto = 120) {
   try {
     console.log(`\n🔍 [BUSCAR MESAS] Buscando para ${fecha} ${hora} (${personas} personas, ${duracion} min)`);
     
@@ -240,7 +242,7 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion) {
     
     // Verificar cada mesa candidata
     for (const mesa of mesasCandidatas.rows) {
-      const validacion = await verificarSolapamiento(pool, mesa.id, fecha, hora, duracion);
+      const validacion = await verificarSolapamiento(pool, mesa.id, fecha, hora, duracion, null, duracionPorDefecto);
       
       if (validacion.valido) {
         mesasDisponibles.push({
@@ -280,9 +282,10 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion) {
  * @param {number} personas - Número de personas
  * @param {number} duracion - Duración en minutos
  * @param {object} horarioRestaurante - Horario de apertura/cierre
+ * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada
  * @returns {Promise<Array>} Lista de horarios alternativos
  */
-async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, personas, duracion, horarioRestaurante) {
+async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, personas, duracion, horarioRestaurante, duracionPorDefecto = 120) {
   try {
     const alternativas = [];
     const [horaOrig, minOrig] = horaOriginal.split(':').map(Number);
@@ -315,11 +318,11 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
       
       if (mesaId) {
         // Verificar mesa específica
-        const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion);
+        const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion, null, duracionPorDefecto);
         mesasDisponibles = validacion.valido ? 1 : 0;
       } else {
         // Buscar cualquier mesa
-        const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion);
+        const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion, duracionPorDefecto);
         mesasDisponibles = mesas.length;
       }
       

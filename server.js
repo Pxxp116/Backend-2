@@ -1692,8 +1692,12 @@ app.post('/api/buscar-mesa', async (req, res) => {
     // NUEVO: Usar sistema centralizado de validación
     console.log(`🔍 [BUSCAR-MESA] Usando validación centralizada para ${fecha} ${hora}`);
     
+    // Obtener duración dinámica de las políticas
+    const duracionPorDefecto = await obtenerDuracionReserva();
+    console.log(`📆 [BUSCAR-MESA] Duración por defecto de políticas: ${duracionPorDefecto} minutos`);
+    
     // Buscar mesas disponibles usando el nuevo sistema
-    const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal);
+    const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal, duracionPorDefecto);
     
     if (mesasDisponibles.length > 0) {
       const mesa = mesasDisponibles[0]; // Tomar la primera mesa disponible
@@ -1738,7 +1742,8 @@ app.post('/api/buscar-mesa', async (req, res) => {
         hora, 
         personas, 
         duracionFinal,
-        horarioDia
+        horarioDia,
+        duracionPorDefecto
       );
       
       console.log(`   📊 Encontradas ${alternativas.length} alternativas sin conflictos`);
@@ -1856,6 +1861,10 @@ app.post('/api/crear-reserva', async (req, res) => {
   try {
     await client.query('BEGIN');
     
+    // Obtener duración dinámica de las políticas
+    const duracionPorDefecto = await obtenerDuracionReserva();
+    console.log(`📆 [CREAR-RESERVA] Duración por defecto de políticas: ${duracionPorDefecto} minutos`);
+    
     // Si no se proporciona mesa_id, buscar una automáticamente
     let mesaAsignada = mesa_id;
     
@@ -1864,7 +1873,7 @@ app.post('/api/crear-reserva', async (req, res) => {
       console.log(`🔍 [CREAR-RESERVA] Validando mesa ${mesaAsignada} con sistema centralizado`);
       
       // Usar el sistema centralizado de validación
-      const validacion = await verificarSolapamiento(pool, mesaAsignada, fecha, hora, duracionFinal);
+      const validacion = await verificarSolapamiento(pool, mesaAsignada, fecha, hora, duracionFinal, null, duracionPorDefecto);
       
       // Log especial para mesa 3
       if (mesaAsignada === 3) {
@@ -1877,7 +1886,8 @@ app.post('/api/crear-reserva', async (req, res) => {
         // Si hay conflictos, buscar alternativas
         const alternativas = await buscarHorariosAlternativos(
           pool, mesaAsignada, fecha, hora, personas, duracionFinal, 
-          await obtenerHorarioDia(fecha)
+          await obtenerHorarioDia(fecha),
+          duracionPorDefecto
         );
         
         let mensajeAlternativas = "";
@@ -1905,7 +1915,7 @@ app.post('/api/crear-reserva', async (req, res) => {
     if (!mesaAsignada) {
       console.log(`🔍 [CREAR-RESERVA] Buscando mesa disponible con sistema centralizado`);
       
-      const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal);
+      const mesasDisponibles = await buscarMesasDisponibles(pool, fecha, hora, personas, duracionFinal, duracionPorDefecto);
       
       if (mesasDisponibles.length === 0) {
         await client.query('ROLLBACK');
@@ -1913,7 +1923,8 @@ app.post('/api/crear-reserva', async (req, res) => {
         // Buscar horarios alternativos
         const alternativas = await buscarHorariosAlternativos(
           pool, null, fecha, hora, personas, duracionFinal,
-          await obtenerHorarioDia(fecha)
+          await obtenerHorarioDia(fecha),
+          duracionPorDefecto
         );
         
         let mensajeAlternativas = "";
