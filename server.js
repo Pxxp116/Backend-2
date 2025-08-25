@@ -141,7 +141,7 @@ async function actualizarArchivoEspejo() {
       LEFT JOIN reservas r ON m.id = r.mesa_id 
         AND r.fecha = CURRENT_DATE 
         AND r.estado = 'confirmada'
-        AND NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+        AND NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
       ORDER BY m.numero_mesa
     `);
     archivoEspejo.mesas = mesasQuery.rows;
@@ -999,39 +999,81 @@ async function obtenerHorarioDia(fecha) {
 }
 
 /**
- * Obtiene la duración de reserva con cache inteligente
+ * Obtiene la duración de reserva SIEMPRE actualizada desde BD
+ * ÚNICA FUENTE DE VERDAD para duración - jamás usar cache
  * @returns {Promise<number>} Duración en minutos
  */
 async function obtenerDuracionReserva() {
   try {
     const timestamp = new Date().toISOString();
-    console.log(`🔍 [FRESH ${timestamp}] Consultando duración actualizada de BD...`);
+    console.log(`🔍 [DURACION-DINAMICA ${timestamp}] Consultando duración REAL-TIME desde BD...`);
     
     // CRÍTICO: SIEMPRE consultar la base de datos para obtener valores frescos
-    // Nunca usar cache - cada consulta debe reflejar la configuración actual del Dashboard
-    const query = await pool.query('SELECT * FROM politicas LIMIT 1');
+    // Esta es la ÚNICA fuente de verdad - nunca usar cache ni valores estáticos
+    const query = await pool.query('SELECT tiempo_mesa_minutos FROM politicas LIMIT 1');
     
     if (query.rows.length > 0) {
-      const politicas = query.rows[0];
+      const duracion = query.rows[0].tiempo_mesa_minutos || 120;
       
-      // El campo correcto según la estructura de BD es tiempo_mesa_minutos
-      const duracion = politicas.tiempo_mesa_minutos || 120;
-      
-      console.log(`✅ [FRESH ${timestamp}] Duración obtenida de BD: ${duracion} minutos`);
-      console.log(`📍 [FRESH] tiempo_mesa_minutos actual = ${politicas.tiempo_mesa_minutos}`);
-      
+      console.log(`✅ [DURACION-DINAMICA] Duración REAL-TIME obtenida: ${duracion} minutos`);
       return duracion;
     }
     
-    // Si no hay políticas, usar valor por defecto
-    console.log(`⚠️ [FRESH ${timestamp}] No hay políticas en BD, usando duración por defecto: 120 minutos`);
+    // Si no hay políticas, usar valor por defecto conservador
+    console.log(`⚠️ [DURACION-DINAMICA] No hay políticas en BD, usando duración por defecto: 120 minutos`);
     return 120;
     
   } catch (error) {
-    console.error('❌ [FRESH] Error obteniendo duración de reserva:', error);
-    // En caso de error, usar valor por defecto
-    return 120;
+    console.error('❌ [DURACION-DINAMICA] Error obteniendo duración de reserva:', error);
+    return 120; // Valor seguro en caso de error
   }
+}
+
+/**
+ * Calcula el fin de una reserva usando SIEMPRE la duración actual del Dashboard
+ * IGNORA completamente la duración almacenada en r.duracion
+ * @param {string} horaInicio - Hora de inicio en formato HH:MM
+ * @param {number|null} duracionAlmacenada - Duración almacenada (será ignorada)
+ * @returns {Promise<{hora_fin: string, minutos_fin: number, duracion_usada: number}>}
+ */
+async function calcularFinReservaDinamica(horaInicio, duracionAlmacenada = null) {
+  // CRÍTICO: Obtener duración ACTUAL del Dashboard, ignorar duracionAlmacenada
+  const duracionActual = await obtenerDuracionReserva();
+  
+  // Convertir hora inicio a minutos
+  const [h, m] = horaInicio.split(':').map(Number);
+  const minutosInicio = h * 60 + m;
+  
+  // Calcular fin usando duración ACTUAL
+  const minutosFin = minutosInicio + duracionActual;
+  
+  // Convertir de vuelta a formato HH:MM
+  const horasFin = Math.floor(minutosFin / 60);
+  const minutosRestantes = minutosFin % 60;
+  const horaFin = `${String(horasFin).padStart(2, '0')}:${String(minutosRestantes).padStart(2, '0')}`;
+  
+  if (duracionAlmacenada && duracionAlmacenada !== duracionActual) {
+    console.log(`🔄 [RECALCULO-DINAMICO] ${horaInicio}: ${duracionAlmacenada}min → ${duracionActual}min (fin: ${horaFin})`);
+  }
+  
+  return {
+    hora_fin: horaFin,
+    minutos_fin: minutosFin,
+    duracion_usada: duracionActual,
+    duracion_original: duracionAlmacenada || duracionActual,
+    recalculado: duracionAlmacenada !== duracionActual
+  };
+}
+
+/**
+ * Calcula la hora fin usando duración dinámica - versión helper
+ * @param {string} horaInicio - Hora inicio HH:MM
+ * @param {number|null} duracionAlmacenada - Duración almacenada (ignorada)
+ * @returns {Promise<string>} Hora fin en formato HH:MM
+ */
+async function calcularHoraFinDinamica(horaInicio, duracionAlmacenada = null) {
+  const resultado = await calcularFinReservaDinamica(horaInicio, duracionAlmacenada);
+  return resultado.hora_fin;
 }
 
 /**
@@ -1563,7 +1605,7 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
               AND r.estado IN ('confirmada', 'pendiente')
               AND (
                 -- Detectar solapamiento: horarios se intersectan
-                $3::TIME < (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+                $3::TIME < (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
                 AND
                 r.hora < ($3::TIME + $4 * INTERVAL '1 minute')
               )
@@ -2187,7 +2229,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
                 r.fecha = $2 
                 AND (
                   -- Solapamiento temporal: verificar intersección de horarios
-                  $3::TIME < (r.hora + COALESCE(r.duracion, $5) * INTERVAL '1 minute')
+                  $3::TIME < (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
                   AND
                   r.hora < ($3::TIME + $5 * INTERVAL '1 minute')
                 )
@@ -2200,7 +2242,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
                     -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
                     
                     -- Reserva existente está en curso ahora
-                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, $5) * INTERVAL '1 minute')
+                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
                     OR
                     -- Reserva existente empezará pronto (< 15 min)
                     (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
@@ -3891,7 +3933,7 @@ app.get('/api/debug/mesa/:id', async (req, res) => {
         AND r.fecha = $2
         AND r.estado = 'confirmada'
         AND NOW()::TIME BETWEEN r.hora 
-        AND (r.hora + COALESCE(r.duracion, 90) * INTERVAL '1 minute')
+        AND (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
     `, [mesaId, fecha]);
     
     // Log especial para mesa 3
@@ -3900,20 +3942,25 @@ app.get('/api/debug/mesa/:id', async (req, res) => {
       console.log(`🎯 [MESA 3 DEBUG] En curso: ${reservasEnCurso.rows.length}`);
     }
     
-    res.json({
-      mesa: mesaInfo.rows[0],
-      fecha: fecha,
-      reservas_totales: reservas.rows.length,
-      reservas: reservas.rows.map(r => ({
+    // Procesar reservas con cálculo dinámico de hora_fin
+    const reservasProcesadas = await Promise.all(
+      reservas.rows.map(async r => ({
         codigo: r.codigo_reserva,
         cliente: r.nombre,
         telefono: r.telefono,
         hora_inicio: r.hora,
         duracion: r.duracion,
-        hora_fin: `${Math.floor((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) / 60)}:${String((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) % 60).padStart(2, '0')}`,
+        hora_fin: await calcularHoraFinDinamica(r.hora, r.duracion),
         estado: r.estado,
         origen: r.origen
-      })),
+      }))
+    );
+    
+    res.json({
+      mesa: mesaInfo.rows[0],
+      fecha: fecha,
+      reservas_totales: reservas.rows.length,
+      reservas: reservasProcesadas,
       reservas_en_curso: reservasEnCurso.rows.length > 0 ? reservasEnCurso.rows[0] : null,
       es_mesa_3: mesaId === 3
     });
@@ -3947,9 +3994,9 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
       ORDER BY m.numero_mesa, r.hora
     `, [fecha]);
     
-    // Agrupar por mesa
+    // Agrupar por mesa con cálculo dinámico de hora_fin
     const reservasPorMesa = {};
-    reservas.rows.forEach(r => {
+    for (const r of reservas.rows) {
       if (!reservasPorMesa[r.mesa_id]) {
         reservasPorMesa[r.mesa_id] = {
           numero_mesa: r.numero_mesa,
@@ -3965,11 +4012,11 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
         telefono: r.telefono,
         hora_inicio: r.hora,
         duracion: r.duracion,
-        hora_fin: `${Math.floor((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) / 60)}:${String((parseInt(r.hora.split(':')[0]) * 60 + parseInt(r.hora.split(':')[1]) + (r.duracion || 90)) % 60).padStart(2, '0')}`,
+        hora_fin: await calcularHoraFinDinamica(r.hora, r.duracion),
         estado: r.estado,
         origen: r.origen
       });
-    });
+    }
     
     // Detectar solapamientos
     const solapamientos = [];
@@ -3980,10 +4027,14 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
           const r1 = mesa.reservas[i];
           const r2 = mesa.reservas[j];
           
+          // Usar hora_fin ya calculada dinámicamente
           const inicio1 = parseInt(r1.hora_inicio.split(':')[0]) * 60 + parseInt(r1.hora_inicio.split(':')[1]);
-          const fin1 = inicio1 + (r1.duracion || 90);
+          const [h1, m1] = r1.hora_fin.split(':');
+          const fin1 = parseInt(h1) * 60 + parseInt(m1);
+          
           const inicio2 = parseInt(r2.hora_inicio.split(':')[0]) * 60 + parseInt(r2.hora_inicio.split(':')[1]);
-          const fin2 = inicio2 + (r2.duracion || 90);
+          const [h2, m2] = r2.hora_fin.split(':');
+          const fin2 = parseInt(h2) * 60 + parseInt(m2);
           
           if (inicio1 < fin2 && inicio2 < fin1) {
             solapamientos.push({

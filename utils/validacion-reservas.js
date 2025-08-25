@@ -6,6 +6,26 @@
 const { Pool } = require('pg');
 
 /**
+ * Obtiene la duración REAL-TIME desde políticas
+ * Debe ser coherente con server.js
+ */
+async function obtenerDuracionActual(pool) {
+  try {
+    const query = await pool.query('SELECT tiempo_mesa_minutos FROM politicas LIMIT 1');
+    if (query.rows.length > 0) {
+      const duracion = query.rows[0].tiempo_mesa_minutos || 120;
+      console.log(`🔍 [VALIDACION-DINAMICA] Duración actual obtenida: ${duracion} minutos`);
+      return duracion;
+    }
+    console.log(`⚠️ [VALIDACION-DINAMICA] Sin políticas, usando 120 minutos por defecto`);
+    return 120;
+  } catch (error) {
+    console.error('❌ [VALIDACION-DINAMICA] Error obteniendo duración:', error);
+    return 120;
+  }
+}
+
+/**
  * Verifica si hay solapamiento entre dos intervalos de tiempo
  * @param {string} inicio1 - Hora inicio primera reserva (HH:MM)
  * @param {number} duracion1 - Duración en minutos
@@ -55,10 +75,12 @@ function formatearMinutos(minutos) {
  * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada en la reserva
  * @returns {Promise<{valido: boolean, conflictos: Array, mensaje: string}>}
  */
-async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reservaIdExcluir = null, duracionPorDefecto = 120) {
-  // CRÍTICO: Asegurar que duracionPorDefecto sea siempre el valor actual de BD
+async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reservaIdExcluir = null, duracionPorDefecto = null) {
+  // CRÍTICO: SIEMPRE obtener duración fresca de BD - ignorar duracionPorDefecto
+  const duracionActual = await obtenerDuracionActual(pool);
   const timestamp = new Date().toISOString();
-  console.log(`🔍 [SOLAPAMIENTO ${timestamp}] Verificando con duración: ${duracion}, defecto: ${duracionPorDefecto}`);
+  console.log(`🔍 [SOLAPAMIENTO-DINAMICO ${timestamp}] Nueva validación con duración REAL-TIME: ${duracionActual} min`);
+  console.log(`🔍 [SOLAPAMIENTO-DINAMICO] Verificando reserva: ${fecha} ${hora} (${duracion} min) vs existentes (${duracionActual} min)`);
   const esMesa3 = mesaId === 3;
   
   if (esMesa3) {
@@ -86,7 +108,7 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
         AND r.estado IN ('confirmada', 'pendiente')
     `;
     
-    const params = [mesaId, fecha, duracionPorDefecto];
+    const params = [mesaId, fecha, duracionActual];
     
     // Si hay una reserva a excluir (modificación)
     if (reservaIdExcluir) {
@@ -148,7 +170,7 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
           AND r.estado = 'confirmada'
           AND NOW()::TIME BETWEEN r.hora 
           AND (r.hora + COALESCE(r.duracion, $3) * INTERVAL '1 minute')
-      `, [mesaId, fecha, duracionPorDefecto]);
+      `, [mesaId, fecha, duracionActual]);
       
       if (reservasEnCurso.rows.length > 0) {
         const reservaActiva = reservasEnCurso.rows[0];
@@ -225,11 +247,13 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
  * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada
  * @returns {Promise<Array>} Lista de mesas disponibles
  */
-async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, duracionPorDefecto = 120) {
+async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, duracionPorDefecto = null) {
   try {
+    // CRÍTICO: Obtener duración REAL-TIME, ignorar duracionPorDefecto
+    const duracionActual = await obtenerDuracionActual(pool);
     const timestamp = new Date().toISOString();
-    console.log(`\n🔍 [BUSCAR MESAS ${timestamp}] Buscando para ${fecha} ${hora} (${personas} personas, ${duracion} min)`);
-    console.log(`📊 [BUSCAR MESAS] Usando duracionPorDefecto ACTUALIZADA: ${duracionPorDefecto} min`);
+    console.log(`\n🔍 [BUSCAR MESAS DINAMICO ${timestamp}] Buscando para ${fecha} ${hora} (${personas} personas)`);
+    console.log(`📊 [BUSCAR MESAS] Nueva reserva: ${duracion} min, existentes recalculadas con: ${duracionActual} min`);
     
     // Primero obtener todas las mesas candidatas
     const mesasCandidatas = await pool.query(`
@@ -247,7 +271,7 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, dur
     
     // Verificar cada mesa candidata
     for (const mesa of mesasCandidatas.rows) {
-      const validacion = await verificarSolapamiento(pool, mesa.id, fecha, hora, duracion, null, duracionPorDefecto);
+      const validacion = await verificarSolapamiento(pool, mesa.id, fecha, hora, duracion, null, duracionActual);
       
       if (validacion.valido) {
         mesasDisponibles.push({
@@ -291,12 +315,14 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, dur
  * @param {number} duracionPorDefecto - Duración por defecto cuando no está especificada
  * @returns {Promise<Array>} Lista de horarios alternativos
  */
-async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, personas, duracion, horarioRestaurante, duracionPorDefecto = 120) {
+async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, personas, duracion, horarioRestaurante, duracionPorDefecto = null) {
   try {
+    // CRÍTICO: Obtener duración REAL-TIME para cálculo de liberaciones
+    const duracionActual = await obtenerDuracionActual(pool);
     const timestamp = new Date().toISOString();
-    console.log(`\n🔍 [ALTERNATIVAS ${timestamp}] Iniciando búsqueda de horarios alternativos`);
-    console.log(`📊 [ALTERNATIVAS] Usando duracionPorDefecto ACTUALIZADA: ${duracionPorDefecto} min`);
-    console.log(`📊 [ALTERNATIVAS] Hora solicitada: ${horaOriginal}, Duración: ${duracion} min`);
+    console.log(`\n🔍 [ALTERNATIVAS-DINAMICO ${timestamp}] Iniciando búsqueda con duración REAL-TIME`);
+    console.log(`📊 [ALTERNATIVAS] Hora solicitada: ${horaOriginal} (${duracion} min)`);
+    console.log(`📊 [ALTERNATIVAS] Reservas existentes recalculadas con: ${duracionActual} min`);
     
     const alternativas = [];
     const [horaOrig, minOrig] = horaOriginal.split(':').map(Number);
@@ -308,11 +334,11 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
     let disponibilidadExacta = 0;
     if (mesaId) {
       // Verificar mesa específica a la hora exacta
-      const validacionExacta = await verificarSolapamiento(pool, mesaId, fecha, horaOriginal, duracion, null, duracionPorDefecto);
+      const validacionExacta = await verificarSolapamiento(pool, mesaId, fecha, horaOriginal, duracion, null, duracionActual);
       disponibilidadExacta = validacionExacta.valido ? 1 : 0;
     } else {
       // Buscar cualquier mesa a la hora exacta
-      const mesasExactas = await buscarMesasDisponibles(pool, fecha, horaOriginal, personas, duracion, duracionPorDefecto);
+      const mesasExactas = await buscarMesasDisponibles(pool, fecha, horaOriginal, personas, duracion, duracionActual);
       disponibilidadExacta = mesasExactas.length;
     }
     
@@ -332,7 +358,7 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
     
     // NUEVO: Detectar los momentos exactos cuando se liberan las mesas
     const horariosLiberacion = await detectarHorariosLiberacionMesas(
-      pool, fecha, minutosOriginal, personas, duracion, duracionPorDefecto, mesaId
+      pool, fecha, minutosOriginal, personas, duracion, duracionActual, mesaId
     );
     
     // Agregar horarios de liberación como alternativas prioritarias
@@ -395,11 +421,11 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
       
       if (mesaId) {
         // Verificar mesa específica
-        const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion, null, duracionPorDefecto);
+        const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion, null, duracionActual);
         mesasDisponibles = validacion.valido ? 1 : 0;
       } else {
         // Buscar cualquier mesa
-        const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion, duracionPorDefecto);
+        const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion, duracionActual);
         mesasDisponibles = mesas.length;
       }
       
@@ -453,7 +479,7 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
  * Detecta los momentos exactos cuando se liberan las mesas
  * @private
  */
-async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, personas, duracion, duracionPorDefecto, mesaId = null) {
+async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, personas, duracion, duracionActual, mesaId = null) {
   try {
     console.log(`   🔍 [LIBERACIÓN] Detectando horarios cuando se liberan mesas...`);
     console.log(`   📊 [LIBERACIÓN] Hora solicitada: ${formatearMinutos(minutosOriginal)} (${minutosOriginal} minutos)`);
@@ -480,7 +506,7 @@ async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, per
           AND m.id = $3
         ORDER BY r.hora
       `;
-      params = [fecha, duracionPorDefecto, mesaId];
+      params = [fecha, duracionActual, mesaId];
     } else {
       // Buscar liberación de cualquier mesa adecuada
       query = `
@@ -500,7 +526,7 @@ async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, per
           AND m.activa = true
         ORDER BY r.hora
       `;
-      params = [fecha, duracionPorDefecto, personas];
+      params = [fecha, duracionActual, personas];
     }
     
     const result = await pool.query(query, params);
