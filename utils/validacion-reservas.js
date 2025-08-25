@@ -280,6 +280,7 @@ async function buscarMesasDisponibles(pool, fecha, hora, personas, duracion, dur
 
 /**
  * Encuentra horarios alternativos sin solapamiento
+ * MEJORADO: Detecta el momento exacto cuando se liberan las mesas
  * @param {Pool} pool - Pool de conexiones
  * @param {number} mesaId - ID de la mesa específica (opcional)
  * @param {string} fecha - Fecha de la reserva
@@ -295,21 +296,49 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
     const timestamp = new Date().toISOString();
     console.log(`\n🔍 [ALTERNATIVAS ${timestamp}] Iniciando búsqueda de horarios alternativos`);
     console.log(`📊 [ALTERNATIVAS] Usando duracionPorDefecto ACTUALIZADA: ${duracionPorDefecto} min`);
+    console.log(`📊 [ALTERNATIVAS] Hora solicitada: ${horaOriginal}, Duración: ${duracion} min`);
     
     const alternativas = [];
     const [horaOrig, minOrig] = horaOriginal.split(':').map(Number);
     const minutosOriginal = horaOrig * 60 + minOrig;
     
-    // Rango de búsqueda: ±3 horas
+    // NUEVO: Primero detectar los momentos exactos cuando se liberan las mesas
+    const horariosLiberacion = await detectarHorariosLiberacionMesas(
+      pool, fecha, minutosOriginal, personas, duracion, duracionPorDefecto, mesaId
+    );
+    
+    // Agregar horarios de liberación como alternativas prioritarias
+    for (const liberacion of horariosLiberacion) {
+      const diferenciaTiempo = Math.abs(liberacion.minutos - minutosOriginal);
+      
+      // Solo incluir si es después de la hora solicitada o muy cercana (hasta 15 min antes)
+      if (liberacion.minutos >= minutosOriginal - 15) {
+        alternativas.push({
+          hora: liberacion.hora,
+          mesas_disponibles: liberacion.mesas_liberadas,
+          diferencia_minutos: diferenciaTiempo,
+          es_horario_cercano: true,
+          es_liberacion_mesa: true,
+          mensaje_liberacion: `Mesa se libera a las ${liberacion.hora}`
+        });
+        
+        console.log(`   🔓 [LIBERACIÓN] Mesa(s) se liberan a las ${liberacion.hora} (${liberacion.mesas_liberadas} mesa(s))`);
+      }
+    }
+    
+    // Rango de búsqueda para otros horarios: ±3 horas
     const rangoMinutos = 180;
     const desde = Math.max(minutosOriginal - rangoMinutos, 8 * 60); // No antes de las 8:00
     const hasta = Math.min(minutosOriginal + rangoMinutos, 23 * 60); // No después de las 23:00
     
-    console.log(`🔍 [ALTERNATIVAS] Buscando horarios alternativos ${formatearMinutos(desde)}-${formatearMinutos(hasta)}`);
+    console.log(`🔍 [ALTERNATIVAS] Buscando horarios adicionales ${formatearMinutos(desde)}-${formatearMinutos(hasta)}`);
     
-    // MEJORADO: Verificar cada slot de 15 minutos para mayor precisión
+    // Buscar slots adicionales cada 15 minutos
     for (let minutos = desde; minutos <= hasta; minutos += 15) {
       const horaAlternativa = formatearMinutos(minutos);
+      
+      // Saltar si ya está en la lista de liberación
+      if (alternativas.some(a => a.hora === horaAlternativa)) continue;
       
       // Saltar la hora original
       if (horaAlternativa === horaOriginal) continue;
@@ -322,8 +351,6 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
         if (minutos <= minutosActuales + 30) continue; // Necesita 30 min de anticipación
       }
       
-      // CRÍTICO: Buscar el momento exacto en que se libera una mesa
-      // Si es una hora cercana al horario solicitado, verificar disponibilidad precisa
       const diferenciaTiempo = Math.abs(minutos - minutosOriginal);
       
       // Buscar mesas disponibles en este horario
@@ -333,20 +360,10 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
         // Verificar mesa específica
         const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion, null, duracionPorDefecto);
         mesasDisponibles = validacion.valido ? 1 : 0;
-        
-        // Log específico para horarios muy cercanos
-        if (diferenciaTiempo <= 60 && validacion.valido) {
-          console.log(`   ✅ [ALTERNATIVA PRECISA] Mesa ${mesaId} libre a las ${horaAlternativa} (${diferenciaTiempo} min después)`);
-        }
       } else {
         // Buscar cualquier mesa
         const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion, duracionPorDefecto);
         mesasDisponibles = mesas.length;
-        
-        // Log específico para horarios muy cercanos
-        if (diferenciaTiempo <= 60 && mesasDisponibles > 0) {
-          console.log(`   ✅ [ALTERNATIVA PRECISA] ${mesasDisponibles} mesas libres a las ${horaAlternativa} (${diferenciaTiempo} min después)`);
-        }
       }
       
       if (mesasDisponibles > 0) {
@@ -354,31 +371,154 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
           hora: horaAlternativa,
           mesas_disponibles: mesasDisponibles,
           diferencia_minutos: diferenciaTiempo,
-          es_horario_cercano: diferenciaTiempo <= 60
+          es_horario_cercano: diferenciaTiempo <= 60,
+          es_liberacion_mesa: false
         });
       }
     }
     
-    // Ordenar por cercanía a la hora original, priorizando horarios cercanos
+    // Ordenar con prioridad especial para horarios de liberación
     alternativas.sort((a, b) => {
-      // Priorizar horarios muy cercanos (dentro de 1 hora)
+      // Primera prioridad: horarios de liberación de mesa
+      if (a.es_liberacion_mesa && !b.es_liberacion_mesa) return -1;
+      if (!a.es_liberacion_mesa && b.es_liberacion_mesa) return 1;
+      
+      // Segunda prioridad: horarios muy cercanos (dentro de 1 hora)
       if (a.es_horario_cercano && !b.es_horario_cercano) return -1;
       if (!a.es_horario_cercano && b.es_horario_cercano) return 1;
       
-      // Si ambos son cercanos o ambos lejanos, ordenar por diferencia
+      // Tercera prioridad: ordenar por diferencia de tiempo
       return a.diferencia_minutos - b.diferencia_minutos;
     });
     
     console.log(`   ✅ Encontradas ${alternativas.length} alternativas`);
     if (alternativas.length > 0) {
       const primeras = alternativas.slice(0, 3);
-      console.log(`   📋 Primeras alternativas:`, primeras.map(a => `${a.hora} (${a.diferencia_minutos} min)`).join(', '));
+      console.log(`   📋 Primeras alternativas:`, primeras.map(a => {
+        const tipo = a.es_liberacion_mesa ? '[LIBERACIÓN]' : '';
+        return `${a.hora} ${tipo} (${a.diferencia_minutos} min)`;
+      }).join(', '));
     }
     
     return alternativas.slice(0, 5); // Máximo 5 alternativas
     
   } catch (error) {
     console.error('❌ Error buscando horarios alternativos:', error);
+    return [];
+  }
+}
+
+/**
+ * Detecta los momentos exactos cuando se liberan las mesas
+ * @private
+ */
+async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, personas, duracion, duracionPorDefecto, mesaId = null) {
+  try {
+    console.log(`   🔍 [LIBERACIÓN] Detectando horarios cuando se liberan mesas...`);
+    
+    // Obtener todas las reservas del día para las mesas adecuadas
+    let query;
+    let params;
+    
+    if (mesaId) {
+      // Buscar liberación de una mesa específica
+      query = `
+        SELECT 
+          r.hora,
+          COALESCE(r.duracion, $2) as duracion,
+          m.id as mesa_id,
+          m.numero_mesa,
+          m.capacidad
+        FROM reservas r
+        JOIN mesas m ON r.mesa_id = m.id
+        WHERE r.fecha = $1
+          AND r.estado IN ('confirmada', 'pendiente')
+          AND m.id = $3
+        ORDER BY r.hora
+      `;
+      params = [fecha, duracionPorDefecto, mesaId];
+    } else {
+      // Buscar liberación de cualquier mesa adecuada
+      query = `
+        SELECT 
+          r.hora,
+          COALESCE(r.duracion, $2) as duracion,
+          m.id as mesa_id,
+          m.numero_mesa,
+          m.capacidad
+        FROM reservas r
+        JOIN mesas m ON r.mesa_id = m.id
+        WHERE r.fecha = $1
+          AND r.estado IN ('confirmada', 'pendiente')
+          AND m.capacidad >= $3
+          AND m.capacidad <= $3 + 2
+          AND m.activa = true
+        ORDER BY r.hora
+      `;
+      params = [fecha, duracionPorDefecto, personas];
+    }
+    
+    const result = await pool.query(query, params);
+    const reservasExistentes = result.rows;
+    
+    const horariosLiberacion = [];
+    const mesasLiberadas = new Map(); // Para rastrear cuándo se libera cada mesa
+    
+    // Calcular cuándo se libera cada mesa
+    for (const reserva of reservasExistentes) {
+      const [h, m] = reserva.hora.split(':').map(Number);
+      const minutosInicio = h * 60 + m;
+      const minutosFin = minutosInicio + reserva.duracion;
+      
+      // Solo considerar si la mesa se libera cerca del horario solicitado (±2 horas)
+      if (Math.abs(minutosFin - minutosOriginal) <= 120) {
+        const horaLiberacion = formatearMinutos(minutosFin);
+        
+        // Agrupar por hora de liberación
+        if (!mesasLiberadas.has(horaLiberacion)) {
+          mesasLiberadas.set(horaLiberacion, {
+            hora: horaLiberacion,
+            minutos: minutosFin,
+            mesas: []
+          });
+        }
+        
+        mesasLiberadas.get(horaLiberacion).mesas.push({
+          mesa_id: reserva.mesa_id,
+          numero_mesa: reserva.numero_mesa,
+          capacidad: reserva.capacidad
+        });
+      }
+    }
+    
+    // Convertir a array y filtrar
+    for (const [hora, info] of mesasLiberadas) {
+      // Verificar que al menos una mesa sea adecuada para el número de personas
+      const mesasAdecuadas = info.mesas.filter(m => 
+        m.capacidad >= personas && m.capacidad <= personas + 2
+      );
+      
+      if (mesasAdecuadas.length > 0) {
+        horariosLiberacion.push({
+          hora: info.hora,
+          minutos: info.minutos,
+          mesas_liberadas: mesasAdecuadas.length,
+          mesas_info: mesasAdecuadas
+        });
+      }
+    }
+    
+    // Ordenar por cercanía al horario solicitado
+    horariosLiberacion.sort((a, b) => 
+      Math.abs(a.minutos - minutosOriginal) - Math.abs(b.minutos - minutosOriginal)
+    );
+    
+    console.log(`   📊 [LIBERACIÓN] Detectados ${horariosLiberacion.length} horarios de liberación`);
+    
+    return horariosLiberacion;
+    
+  } catch (error) {
+    console.error('❌ Error detectando horarios de liberación:', error);
     return [];
   }
 }

@@ -1750,19 +1750,43 @@ app.post('/api/buscar-mesa', async (req, res) => {
       if (alternativas.length > 0) {
         const primeraAlternativa = alternativas[0];
         
-        // Si la primera alternativa está muy cerca (30 min o menos), es probablemente cuando se libera una mesa
-        if (primeraAlternativa.diferencia_minutos <= 30) {
+        // NUEVO: Verificar si es un horario de liberación de mesa
+        if (primeraAlternativa.es_liberacion_mesa) {
+          // Mensaje específico cuando detectamos liberación exacta
           const diferencia = primeraAlternativa.diferencia_minutos;
-          mensajeRespuesta += `. La mesa se libera a las ${primeraAlternativa.hora} (${diferencia} minutos después)`;
+          if (diferencia === 0) {
+            // La mesa se libera exactamente a la hora solicitada (caso raro)
+            mensajeRespuesta = `La mesa está ocupada hasta las ${primeraAlternativa.hora}, pero se libera justo en ese momento`;
+            sugerenciaTexto = `La mesa se libera a las ${primeraAlternativa.hora}. ¿Te gustaría reservar para esa hora?`;
+          } else if (diferencia <= 30) {
+            // La mesa se libera muy cerca de la hora solicitada
+            mensajeRespuesta = `La mesa está ocupada hasta las ${primeraAlternativa.hora} (${diferencia} minutos después de tu hora solicitada)`;
+            sugerenciaTexto = `Primera disponibilidad: ${primeraAlternativa.hora} cuando se libera la mesa`;
+          } else {
+            // La mesa se libera más tarde
+            mensajeRespuesta += `. La próxima mesa se libera a las ${primeraAlternativa.hora}`;
+            sugerenciaTexto = `Mesa disponible a partir de las ${primeraAlternativa.hora}`;
+          }
+        } else if (primeraAlternativa.diferencia_minutos <= 30) {
+          // Horario muy cercano pero no es liberación (mesa libre)
+          const diferencia = primeraAlternativa.diferencia_minutos;
+          mensajeRespuesta += `. Hay disponibilidad a las ${primeraAlternativa.hora} (${diferencia} minutos después)`;
           sugerenciaTexto = `Primera disponibilidad: ${primeraAlternativa.hora}`;
         } else {
+          // Horario más lejano
           mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
           sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
         }
         
+        // Agregar otras opciones si hay
         if (alternativas.length > 1) {
-          const otrasHoras = alternativas.slice(1, 3).map(a => a.hora);
-          sugerenciaTexto += `. Otras opciones: ${otrasHoras.join(', ')}`;
+          const otrasOpciones = alternativas.slice(1, 3).map(a => {
+            if (a.es_liberacion_mesa) {
+              return `${a.hora} (se libera mesa)`;
+            }
+            return a.hora;
+          });
+          sugerenciaTexto += `. Otras opciones: ${otrasOpciones.join(', ')}`;
         }
       } else {
         mensajeRespuesta += `. No encontré disponibilidad en las próximas 3 horas`;
@@ -1774,7 +1798,9 @@ app.post('/api/buscar-mesa', async (req, res) => {
         hora: a.hora,
         mesas_disponibles: a.mesas_disponibles,
         diferencia_minutos: a.diferencia_minutos,
-        es_horario_cercano: a.es_horario_cercano
+        es_horario_cercano: a.es_horario_cercano,
+        es_liberacion_mesa: a.es_liberacion_mesa || false,
+        mensaje_liberacion: a.mensaje_liberacion || null
       }));
       
       res.json({
