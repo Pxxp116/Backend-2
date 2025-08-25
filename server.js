@@ -171,7 +171,21 @@ async function actualizarArchivoEspejo() {
     
     const categorias = categoriasQuery.rows.map(cat => ({
       ...cat,
-      platos: platosQuery.rows.filter(plato => plato.categoria_id === cat.id)
+      platos: platosQuery.rows
+        .filter(plato => plato.categoria_id === cat.id)
+        .map(plato => {
+          // Limpiar URLs de imagen inválidas al cargar
+          const platoLimpio = { ...plato };
+          if (platoLimpio.imagen_url) {
+            // Solo mantener URLs HTTP/HTTPS válidas
+            if (platoLimpio.imagen_url.startsWith('blob:') || 
+                platoLimpio.imagen_url.startsWith('data:') ||
+                !platoLimpio.imagen_url.match(/^https?:\/\/.+/)) {
+              platoLimpio.imagen_url = null;  // Eliminar URL inválida
+            }
+          }
+          return platoLimpio;
+        })
     }));
     archivoEspejo.menu = { categorias };
     
@@ -1656,7 +1670,7 @@ app.get('/api/ver-menu', verificarFrescura, (req, res) => {
     );
   }
   
-  // Filtrar platos
+  // Filtrar y limpiar platos
   menu.categorias = menu.categorias.map(cat => ({
     ...cat,
     platos: cat.platos.filter(p => {
@@ -1664,6 +1678,18 @@ app.get('/api/ver-menu', verificarFrescura, (req, res) => {
       if (vegetariano === 'true' && !p.vegetariano) return false;
       if (alergeno && p.alergenos?.includes(alergeno)) return false;
       return true;
+    }).map(p => {
+      // Limpiar URLs de imagen inválidas (blob:, data:, etc.)
+      const plato = { ...p };
+      if (plato.imagen_url) {
+        // Solo permitir URLs HTTP/HTTPS válidas
+        if (plato.imagen_url.startsWith('blob:') || 
+            plato.imagen_url.startsWith('data:') ||
+            !plato.imagen_url.match(/^https?:\/\/.+/)) {
+          delete plato.imagen_url;  // Eliminar URL inválida
+        }
+      }
+      return plato;
     })
   }));
   
