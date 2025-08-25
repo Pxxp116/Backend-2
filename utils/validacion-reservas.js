@@ -129,14 +129,16 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
     
     // Verificar cada reserva existente
     for (const reserva of reservasExistentes) {
-      if (haySolapamiento(hora, duracion, reserva.hora, reserva.duracion)) {
+      // CRÍTICO: Usar duracionActual para TODAS las reservas existentes, no reserva.duracion
+      if (haySolapamiento(hora, duracion, reserva.hora, duracionActual)) {
+        console.log(`🔄 [RECALCULO-SOLAPAMIENTO] Reserva ${reserva.hora}: almacenada=${reserva.duracion}min, calculada=${duracionActual}min`);
         const conflicto = {
           codigo: reserva.codigo_reserva,
           hora_inicio: reserva.hora,
           hora_fin: formatearMinutos(
             parseInt(reserva.hora.split(':')[0]) * 60 + 
             parseInt(reserva.hora.split(':')[1]) + 
-            reserva.duracion
+            duracionActual
           ),
           cliente: reserva.cliente_nombre,
           origen: reserva.origen
@@ -539,7 +541,8 @@ async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, per
     for (const reserva of reservasExistentes) {
       const [h, m] = reserva.hora.split(':').map(Number);
       const minutosInicio = h * 60 + m;
-      const minutosFin = minutosInicio + reserva.duracion;
+      // CRÍTICO: Usar duración actual para calcular cuándo se libera REALMENTE la mesa
+      const minutosFin = minutosInicio + duracionActual;
       
       // CRÍTICO: Incluir SIEMPRE si coincide exactamente con la hora solicitada
       const diferenciaMinutos = Math.abs(minutosFin - minutosOriginal);
@@ -553,7 +556,7 @@ async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, per
         
         if (esLiberacionExacta) {
           console.log(`   🎯 [LIBERACIÓN EXACTA] Mesa ${reserva.numero_mesa} se libera EXACTAMENTE a las ${horaLiberacion}!`);
-          console.log(`      Reserva actual: ${reserva.hora} con duración ${reserva.duracion} min`);
+          console.log(`      Reserva: ${reserva.hora} (duración almacenada: ${reserva.duracion}min, REAL: ${duracionActual}min)`);
         }
         
         // Agrupar por hora de liberación
@@ -571,7 +574,8 @@ async function detectarHorariosLiberacionMesas(pool, fecha, minutosOriginal, per
           numero_mesa: reserva.numero_mesa,
           capacidad: reserva.capacidad,
           hora_inicio_reserva: reserva.hora,
-          duracion_reserva: reserva.duracion
+          duracion_reserva: duracionActual,
+          duracion_original: reserva.duracion
         });
       }
     }
