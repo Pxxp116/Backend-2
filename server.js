@@ -1704,7 +1704,13 @@ app.post('/api/buscar-mesa', async (req, res) => {
       res.json({
         exito: true,
         mesa_disponible: mesa,
-        mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`
+        mensaje: `Mesa ${mesa.numero_mesa} disponible (capacidad: ${mesa.capacidad} personas, zona: ${mesa.zona || 'principal'})`,
+        debug_info: {
+          duracion_usada: duracionFinal,
+          duracion_por_defecto: duracionPorDefecto,
+          mesa_asignada: mesa.id,
+          sistema_mejorado: true
+        }
       });
     } else {
       // BUSCAR ALTERNATIVAS USANDO SISTEMA CENTRALIZADO
@@ -1736,28 +1742,39 @@ app.post('/api/buscar-mesa', async (req, res) => {
       
       console.log(`   📊 Encontradas ${alternativas.length} alternativas sin conflictos`);
       
-      // Construir mensaje más informativo
+      // MEJORADO: Mensaje más específico sobre cuándo se libera la mesa
       let mensajeRespuesta = `No hay disponibilidad para ${personas} personas el ${fecha} a las ${hora}`;
-      mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
       
-      // Generar sugerencia más detallada
+      // Analizar alternativas para dar mejor sugerencia
       let sugerenciaTexto = "";
       if (alternativas.length > 0) {
         const primeraAlternativa = alternativas[0];
-        sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
+        
+        // Si la primera alternativa está muy cerca (30 min o menos), es probablemente cuando se libera una mesa
+        if (primeraAlternativa.diferencia_minutos <= 30) {
+          const diferencia = primeraAlternativa.diferencia_minutos;
+          mensajeRespuesta += `. La mesa se libera a las ${primeraAlternativa.hora} (${diferencia} minutos después)`;
+          sugerenciaTexto = `Primera disponibilidad: ${primeraAlternativa.hora}`;
+        } else {
+          mensajeRespuesta += `. Todas las mesas están reservadas en ese horario`;
+          sugerenciaTexto = `Te sugiero las ${primeraAlternativa.hora} (${primeraAlternativa.mesas_disponibles} mesa${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''} disponible${primeraAlternativa.mesas_disponibles > 1 ? 's' : ''})`;
+        }
         
         if (alternativas.length > 1) {
-          const otrasHoras = alternativas.slice(1, 4).map(a => a.hora);
-          sugerenciaTexto += `. También hay disponibilidad a las: ${otrasHoras.join(', ')}`;
+          const otrasHoras = alternativas.slice(1, 3).map(a => a.hora);
+          sugerenciaTexto += `. Otras opciones: ${otrasHoras.join(', ')}`;
         }
       } else {
-        sugerenciaTexto = "No hay disponibilidad en este día. ¿Te gustaría probar otro día?";
+        mensajeRespuesta += `. No encontré disponibilidad en las próximas 3 horas`;
+        sugerenciaTexto = "No hay disponibilidad cercana. ¿Te gustaría probar otro día?";
       }
       
-      // Formatear alternativas para la respuesta
+      // Formatear alternativas para la respuesta con información adicional
       const alternativasFormateadas = alternativas.map(a => ({
-        hora_alternativa: a.hora,
-        mesas_disponibles: a.mesas_disponibles
+        hora: a.hora,
+        mesas_disponibles: a.mesas_disponibles,
+        diferencia_minutos: a.diferencia_minutos,
+        es_horario_cercano: a.es_horario_cercano
       }));
       
       res.json({
@@ -1769,7 +1786,13 @@ app.post('/api/buscar-mesa', async (req, res) => {
           cierre: horarioDia.cierre?.substring(0,5),
           duracion_reserva: duracionFinal
         },
-        sugerencia: sugerenciaTexto
+        sugerencia: sugerenciaTexto,
+        debug_info: {
+          duracion_usada: duracionFinal,
+          duracion_por_defecto: duracionPorDefecto,
+          total_alternativas: alternativas.length,
+          rango_busqueda_horas: 3
+        }
       });
     }
   } catch (error) {

@@ -307,8 +307,8 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
     
     console.log(`🔍 [ALTERNATIVAS] Buscando horarios alternativos ${formatearMinutos(desde)}-${formatearMinutos(hasta)}`);
     
-    // Verificar cada slot de 30 minutos
-    for (let minutos = desde; minutos <= hasta; minutos += 30) {
+    // MEJORADO: Verificar cada slot de 15 minutos para mayor precisión
+    for (let minutos = desde; minutos <= hasta; minutos += 15) {
       const horaAlternativa = formatearMinutos(minutos);
       
       // Saltar la hora original
@@ -322,6 +322,10 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
         if (minutos <= minutosActuales + 30) continue; // Necesita 30 min de anticipación
       }
       
+      // CRÍTICO: Buscar el momento exacto en que se libera una mesa
+      // Si es una hora cercana al horario solicitado, verificar disponibilidad precisa
+      const diferenciaTiempo = Math.abs(minutos - minutosOriginal);
+      
       // Buscar mesas disponibles en este horario
       let mesasDisponibles;
       
@@ -329,25 +333,47 @@ async function buscarHorariosAlternativos(pool, mesaId, fecha, horaOriginal, per
         // Verificar mesa específica
         const validacion = await verificarSolapamiento(pool, mesaId, fecha, horaAlternativa, duracion, null, duracionPorDefecto);
         mesasDisponibles = validacion.valido ? 1 : 0;
+        
+        // Log específico para horarios muy cercanos
+        if (diferenciaTiempo <= 60 && validacion.valido) {
+          console.log(`   ✅ [ALTERNATIVA PRECISA] Mesa ${mesaId} libre a las ${horaAlternativa} (${diferenciaTiempo} min después)`);
+        }
       } else {
         // Buscar cualquier mesa
         const mesas = await buscarMesasDisponibles(pool, fecha, horaAlternativa, personas, duracion, duracionPorDefecto);
         mesasDisponibles = mesas.length;
+        
+        // Log específico para horarios muy cercanos
+        if (diferenciaTiempo <= 60 && mesasDisponibles > 0) {
+          console.log(`   ✅ [ALTERNATIVA PRECISA] ${mesasDisponibles} mesas libres a las ${horaAlternativa} (${diferenciaTiempo} min después)`);
+        }
       }
       
       if (mesasDisponibles > 0) {
         alternativas.push({
           hora: horaAlternativa,
           mesas_disponibles: mesasDisponibles,
-          diferencia_minutos: Math.abs(minutos - minutosOriginal)
+          diferencia_minutos: diferenciaTiempo,
+          es_horario_cercano: diferenciaTiempo <= 60
         });
       }
     }
     
-    // Ordenar por cercanía a la hora original
-    alternativas.sort((a, b) => a.diferencia_minutos - b.diferencia_minutos);
+    // Ordenar por cercanía a la hora original, priorizando horarios cercanos
+    alternativas.sort((a, b) => {
+      // Priorizar horarios muy cercanos (dentro de 1 hora)
+      if (a.es_horario_cercano && !b.es_horario_cercano) return -1;
+      if (!a.es_horario_cercano && b.es_horario_cercano) return 1;
+      
+      // Si ambos son cercanos o ambos lejanos, ordenar por diferencia
+      return a.diferencia_minutos - b.diferencia_minutos;
+    });
     
     console.log(`   ✅ Encontradas ${alternativas.length} alternativas`);
+    if (alternativas.length > 0) {
+      const primeras = alternativas.slice(0, 3);
+      console.log(`   📋 Primeras alternativas:`, primeras.map(a => `${a.hora} (${a.diferencia_minutos} min)`).join(', '));
+    }
     
     return alternativas.slice(0, 5); // Máximo 5 alternativas
     
