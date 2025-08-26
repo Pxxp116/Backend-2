@@ -9,6 +9,7 @@ const { Pool } = require('pg');
 const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
+const multer = require('multer');
 require('dotenv').config();
 
 // Importar sistema de validación centralizado
@@ -41,6 +42,9 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json());
+
+// Servir archivos estáticos desde /uploads
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ===== CONFIGURACIÓN ANTI-CACHE PARA GPT =====
 // Desactivar ETag globalmente
@@ -93,6 +97,51 @@ if (process.env.DATABASE_URL) {
   });
   console.log('💻 Usando configuración local de base de datos');
 }
+
+// ============================================
+// CONFIGURACIÓN MULTER PARA SUBIDA DE IMÁGENES
+// ============================================
+
+// Crear directorio uploads/images si no existe
+const uploadsDir = path.join(__dirname, 'uploads', 'images');
+fs.mkdir(uploadsDir, { recursive: true }).catch(console.error);
+
+// Configuración de almacenamiento de multer
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    // Generar nombre único con timestamp
+    const timestamp = Date.now();
+    const extension = path.extname(file.originalname).toLowerCase();
+    const nameWithoutExt = path.basename(file.originalname, extension);
+    const safeFileName = nameWithoutExt.replace(/[^a-zA-Z0-9]/g, '_');
+    cb(null, `${safeFileName}_${timestamp}${extension}`);
+  }
+});
+
+// Filtro de archivos - solo imágenes
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = /jpeg|jpg|png|gif|webp/;
+  const extName = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+  const mimeType = allowedTypes.test(file.mimetype);
+  
+  if (mimeType && extName) {
+    return cb(null, true);
+  } else {
+    cb(new Error('Solo se permiten archivos de imagen (JPEG, PNG, GIF, WebP)'));
+  }
+};
+
+// Configuración de multer
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB máximo
+  },
+  fileFilter: fileFilter
+});
 
 // ============================================
 // ARCHIVO ESPEJO - Sistema de actualización
@@ -3293,32 +3342,44 @@ app.put('/api/admin/menu/plato/:id/disponibilidad', async (req, res) => {
   }
 });
 
-// Subir imagen de plato (simple, guardando URL)
-app.post('/api/admin/menu/plato/imagen', async (req, res) => {
-  // Por ahora, implementamos un endpoint simple que recibe una URL
-  // En el futuro se puede extender para manejar archivos con multer
-  const { imagen_url } = req.body;
-  
-  if (!imagen_url) {
-    return res.status(400).json({
-      exito: false,
-      mensaje: "Se requiere una URL de imagen"
-    });
-  }
-  
+// Subir imagen de plato con archivos reales
+app.post('/api/admin/menu/plato/imagen', upload.single('imagen'), async (req, res) => {
   try {
-    // Validar que la URL sea válida
-    new URL(imagen_url);
+    if (!req.file) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: "No se recibió ningún archivo de imagen"
+      });
+    }
+
+    // Construir URL pública para la imagen
+    const baseUrl = process.env.NODE_ENV === 'production' 
+      ? (process.env.BASE_URL || 'https://backend-2-production-227a.up.railway.app')
+      : `http://localhost:${PORT}`;
     
+    const imagenUrl = `${baseUrl}/uploads/images/${req.file.filename}`;
+    
+    console.log(`📸 Imagen subida exitosamente: ${req.file.filename}`);
+    console.log(`📍 URL pública generada: ${imagenUrl}`);
+    
+    // Respuesta exitosa
     res.json({
       exito: true,
-      imagen_url: imagen_url,
-      mensaje: "URL de imagen procesada correctamente"
+      imagen_url: imagenUrl,
+      mensaje: "Imagen subida correctamente",
+      archivo: {
+        nombre_original: req.file.originalname,
+        nombre_archivo: req.file.filename,
+        tamaño: req.file.size,
+        tipo: req.file.mimetype
+      }
     });
+
   } catch (error) {
-    res.status(400).json({
+    console.error('Error subiendo imagen:', error);
+    res.status(500).json({
       exito: false,
-      mensaje: "URL de imagen no válida"
+      mensaje: "Error interno del servidor al subir imagen"
     });
   }
 });
