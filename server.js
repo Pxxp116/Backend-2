@@ -3081,17 +3081,235 @@ app.get('/api/admin/menu', async (req, res) => {
 app.post('/api/admin/menu/categoria', async (req, res) => {
   const { nombre, descripcion, orden } = req.body;
   
+  // Validaciones
+  if (!nombre || nombre.trim().length === 0) {
+    return res.status(400).json({ 
+      exito: false, 
+      mensaje: "El nombre de la categoría es obligatorio" 
+    });
+  }
+  
+  if (nombre.trim().length < 3 || nombre.trim().length > 50) {
+    return res.status(400).json({ 
+      exito: false, 
+      mensaje: "El nombre debe tener entre 3 y 50 caracteres" 
+    });
+  }
+  
   try {
+    // Verificar si ya existe una categoría con el mismo nombre
+    const duplicada = await pool.query(
+      'SELECT id FROM categorias_menu WHERE LOWER(nombre) = LOWER($1)',
+      [nombre.trim()]
+    );
+    
+    if (duplicada.rows.length > 0) {
+      return res.status(400).json({ 
+        exito: false, 
+        mensaje: `Ya existe una categoría con el nombre "${nombre}"` 
+      });
+    }
+    
+    // Crear la categoría
     const resultado = await pool.query(
       'INSERT INTO categorias_menu (nombre, descripcion, orden, visible) VALUES ($1, $2, $3, true) RETURNING *',
-      [nombre, descripcion, orden || 0]
+      [nombre.trim(), descripcion?.trim() || '', orden || 0]
     );
     
     await actualizarArchivoEspejo();
     await generarEspejo();
-    res.json({ exito: true, categoria: resultado.rows[0] });
+    
+    res.json({ 
+      exito: true, 
+      categoria: resultado.rows[0],
+      mensaje: `Categoría "${nombre}" creada correctamente`
+    });
   } catch (error) {
-    res.status(500).json({ exito: false, mensaje: "Error al crear categoría" });
+    console.error('Error creando categoría:', error);
+    res.status(500).json({ 
+      exito: false, 
+      mensaje: "Error al crear la categoría" 
+    });
+  }
+});
+
+// Actualizar categoría del menú
+app.put('/api/admin/menu/categoria/:id', async (req, res) => {
+  const { id } = req.params;
+  const { nombre, descripcion, orden, visible } = req.body;
+  
+  // Validaciones
+  if (nombre !== undefined) {
+    if (!nombre || nombre.trim().length === 0) {
+      return res.status(400).json({ 
+        exito: false, 
+        mensaje: "El nombre de la categoría no puede estar vacío" 
+      });
+    }
+    
+    if (nombre.trim().length < 3 || nombre.trim().length > 50) {
+      return res.status(400).json({ 
+        exito: false, 
+        mensaje: "El nombre debe tener entre 3 y 50 caracteres" 
+      });
+    }
+  }
+  
+  try {
+    // Verificar que la categoría existe
+    const existe = await pool.query(
+      'SELECT * FROM categorias_menu WHERE id = $1',
+      [id]
+    );
+    
+    if (existe.rows.length === 0) {
+      return res.status(404).json({ 
+        exito: false, 
+        mensaje: "Categoría no encontrada" 
+      });
+    }
+    
+    // Si se está cambiando el nombre, verificar que no exista otra con el mismo
+    if (nombre && nombre.trim().toLowerCase() !== existe.rows[0].nombre.toLowerCase()) {
+      const duplicada = await pool.query(
+        'SELECT id FROM categorias_menu WHERE LOWER(nombre) = LOWER($1) AND id != $2',
+        [nombre.trim(), id]
+      );
+      
+      if (duplicada.rows.length > 0) {
+        return res.status(400).json({ 
+          exito: false, 
+          mensaje: `Ya existe otra categoría con el nombre "${nombre}"` 
+        });
+      }
+    }
+    
+    // Construir query de actualización dinámicamente
+    const campos = [];
+    const valores = [];
+    let contador = 1;
+    
+    if (nombre !== undefined) {
+      campos.push(`nombre = $${contador++}`);
+      valores.push(nombre.trim());
+    }
+    if (descripcion !== undefined) {
+      campos.push(`descripcion = $${contador++}`);
+      valores.push(descripcion.trim());
+    }
+    if (orden !== undefined) {
+      campos.push(`orden = $${contador++}`);
+      valores.push(orden);
+    }
+    if (visible !== undefined) {
+      campos.push(`visible = $${contador++}`);
+      valores.push(visible);
+    }
+    
+    if (campos.length === 0) {
+      return res.status(400).json({ 
+        exito: false, 
+        mensaje: "No se proporcionaron campos para actualizar" 
+      });
+    }
+    
+    valores.push(id);
+    const query = `UPDATE categorias_menu SET ${campos.join(', ')} WHERE id = $${contador} RETURNING *`;
+    
+    const resultado = await pool.query(query, valores);
+    
+    await actualizarArchivoEspejo();
+    await generarEspejo();
+    
+    res.json({ 
+      exito: true, 
+      categoria: resultado.rows[0],
+      mensaje: `Categoría actualizada correctamente`
+    });
+    
+  } catch (error) {
+    console.error('Error actualizando categoría:', error);
+    res.status(500).json({ 
+      exito: false, 
+      mensaje: "Error al actualizar la categoría" 
+    });
+  }
+});
+
+// Eliminar categoría del menú
+app.delete('/api/admin/menu/categoria/:id', async (req, res) => {
+  const { id } = req.params;
+  const { forzar = false } = req.query; // Si forzar=true, elimina también los platos
+  
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Verificar que la categoría existe
+    const categoria = await client.query(
+      'SELECT * FROM categorias_menu WHERE id = $1',
+      [id]
+    );
+    
+    if (categoria.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ 
+        exito: false, 
+        mensaje: "Categoría no encontrada" 
+      });
+    }
+    
+    // Verificar si tiene platos asociados
+    const platos = await client.query(
+      'SELECT COUNT(*) as total FROM platos WHERE categoria_id = $1',
+      [id]
+    );
+    
+    const totalPlatos = parseInt(platos.rows[0].total);
+    
+    if (totalPlatos > 0 && !forzar) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        exito: false, 
+        mensaje: `Esta categoría contiene ${totalPlatos} plato${totalPlatos > 1 ? 's' : ''}. Use forzar=true para eliminar todo.`,
+        platosAsociados: totalPlatos,
+        requiereForzar: true
+      });
+    }
+    
+    // Si hay platos y se está forzando, eliminarlos primero
+    if (totalPlatos > 0 && forzar) {
+      await client.query('DELETE FROM platos WHERE categoria_id = $1', [id]);
+    }
+    
+    // Eliminar la categoría
+    await client.query('DELETE FROM categorias_menu WHERE id = $1', [id]);
+    
+    await client.query('COMMIT');
+    
+    await actualizarArchivoEspejo();
+    await generarEspejo();
+    
+    const mensajeEliminacion = totalPlatos > 0 && forzar 
+      ? `Categoría "${categoria.rows[0].nombre}" y sus ${totalPlatos} plato${totalPlatos > 1 ? 's' : ''} eliminados correctamente`
+      : `Categoría "${categoria.rows[0].nombre}" eliminada correctamente`;
+    
+    res.json({ 
+      exito: true, 
+      mensaje: mensajeEliminacion,
+      platosEliminados: forzar ? totalPlatos : 0
+    });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error eliminando categoría:', error);
+    res.status(500).json({ 
+      exito: false, 
+      mensaje: "Error al eliminar la categoría" 
+    });
+  } finally {
+    client.release();
   }
 });
 
