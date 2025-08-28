@@ -298,7 +298,14 @@ async function generarEspejo() {
       telefono: restauranteQuery.rows[0]?.telefono || '',
       email: restauranteQuery.rows[0]?.email || '',
       direccion: restauranteQuery.rows[0]?.direccion || '',
-      sitio_web: restauranteQuery.rows[0]?.web || ''
+      sitio_web: restauranteQuery.rows[0]?.web || '',
+      tipo_cocina: restauranteQuery.rows[0]?.tipo_cocina || '',
+      descripcion: restauranteQuery.rows[0]?.descripcion || '',
+      // Redes sociales
+      facebook: restauranteQuery.rows[0]?.facebook || '',
+      instagram: restauranteQuery.rows[0]?.instagram || '',
+      twitter: restauranteQuery.rows[0]?.twitter || '',
+      tripadvisor: restauranteQuery.rows[0]?.tripadvisor || ''
     };
     
     // 2. Horarios
@@ -3831,23 +3838,24 @@ app.put('/api/admin/restaurante', async (req, res) => {
       resultado = await pool.query(`
         UPDATE restaurante 
         SET 
-          nombre = COALESCE($1, nombre),
-          tipo_cocina = COALESCE($2, tipo_cocina),
-          direccion = COALESCE($3, direccion),
-          telefono = COALESCE($4, telefono),
-          email = COALESCE($5, email),
-          web = COALESCE($6, web),
-          descripcion = COALESCE($7, descripcion),
-          facebook = COALESCE($8, facebook),
-          instagram = COALESCE($9, instagram),
-          twitter = COALESCE($10, twitter),
-          tripadvisor = COALESCE($11, tripadvisor),
+          nombre = $1,
+          tipo_cocina = $2,
+          direccion = $3,
+          telefono = $4,
+          email = $5,
+          web = $6,
+          descripcion = $7,
+          facebook = $8,
+          instagram = $9,
+          twitter = $10,
+          tripadvisor = $11,
           actualizado_en = NOW()
         WHERE id = $12
         RETURNING *
       `, [
-        nombre, tipo_cocina, direccion, telefono, email, web, 
-        descripcion, facebook, instagram, twitter, tripadvisor,
+        nombre || '', tipo_cocina || '', direccion || '', telefono || '', 
+        email || '', web || '', descripcion || '', facebook || '', 
+        instagram || '', twitter || '', tripadvisor || '',
         existe.rows[0].id
       ]);
     } else {
