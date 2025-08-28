@@ -3567,6 +3567,52 @@ app.put('/api/admin/menu/plato/:id/disponibilidad', async (req, res) => {
   }
 });
 
+// Validar plato duplicado
+app.post('/api/admin/menu/plato/validar', async (req, res) => {
+  const { nombre, categoria_id, plato_id } = req.body;
+  
+  try {
+    // Validación de campos requeridos
+    if (!nombre || !categoria_id) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: "Nombre y categoría son requeridos"
+      });
+    }
+
+    // Buscar platos con el mismo nombre en la misma categoría
+    let query = 'SELECT id, nombre FROM platos WHERE LOWER(nombre) = LOWER($1) AND categoria_id = $2';
+    const params = [nombre.trim(), categoria_id];
+    
+    // Si se está editando un plato, excluirlo de la búsqueda
+    if (plato_id) {
+      query += ' AND id != $3';
+      params.push(plato_id);
+    }
+    
+    const resultado = await pool.query(query, params);
+    
+    const duplicado = resultado.rows.length > 0;
+    
+    res.json({
+      exito: true,
+      duplicado,
+      mensaje: duplicado 
+        ? `Ya existe un plato llamado "${nombre}" en esta categoría`
+        : 'Nombre disponible',
+      plato_existente: duplicado ? resultado.rows[0] : null
+    });
+    
+  } catch (error) {
+    console.error('Error validando plato:', error);
+    res.status(500).json({ 
+      exito: false, 
+      mensaje: "Error al validar el plato",
+      error: error.message
+    });
+  }
+});
+
 // Subir imagen de plato con archivos reales
 app.post('/api/admin/menu/plato/imagen', upload.single('imagen'), async (req, res) => {
   try {
