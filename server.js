@@ -2293,64 +2293,73 @@ app.put('/api/modificar-reserva', async (req, res) => {
         }
       }
       
-      // Buscar nueva mesa si es necesario
-      // Usar la duración actual de la reserva o la duración por defecto
+      // Buscar nueva mesa usando el sistema centralizado de validación
       const duracionReserva = reserva.duracion || await obtenerDuracionReserva();
+      const duracionPorDefecto = await obtenerDuracionReserva();
       
-      const mesaQuery = await client.query(`
-        SELECT m.id FROM mesas m
-        WHERE m.capacidad >= $1
-          AND m.activa = true
-          AND NOT EXISTS (
-            SELECT 1 FROM reservas r
-            WHERE r.mesa_id = m.id
-              AND r.estado IN ('confirmada', 'pendiente')
-              AND r.id != $4
-              AND (
-                -- CASO 1: Misma fecha - verificar solapamientos básicos
-                r.fecha = $2 
-                AND (
-                  -- Solapamiento temporal: verificar intersección de horarios
-                  $3::TIME < (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
-                  AND
-                  r.hora < ($3::TIME + $5 * INTERVAL '1 minute')
-                )
-                AND (
-                  -- CASO 1A: Para fechas futuras, solo verificar solapamiento básico
-                  r.fecha > CURRENT_DATE
-                  OR
-                  -- CASO 1B: Para HOY, verificar solapamiento + protecciones adicionales
-                  (r.fecha = CURRENT_DATE AND (
-                    -- Solapamiento básico ya verificado arriba, ahora verificar casos especiales:
-                    
-                    -- Reserva existente está en curso ahora
-                    NOW()::TIME BETWEEN r.hora AND (r.hora + COALESCE(r.duracion, (SELECT tiempo_mesa_minutos FROM politicas LIMIT 1), 120) * INTERVAL '1 minute')
-                    OR
-                    -- Reserva existente empezará pronto (< 15 min)
-                    (r.hora <= (NOW()::TIME + INTERVAL '15 minutes') AND r.hora >= NOW()::TIME)
-                    OR
-                    -- Nueva reserva es muy pronto (< 15 min) y hay solapamiento
-                    ($3::TIME <= (NOW()::TIME + INTERVAL '15 minutes'))
-                    OR
-                    -- Caso normal: simplemente hay solapamiento de horarios
-                    true  -- Ya verificado en la condición principal
-                  ))
-                )
-              )
-          )
-        ORDER BY m.capacidad
-        LIMIT 1
-      `, [nuevasPersonas, nuevaFecha, nuevaHora, reserva.id, duracionReserva]);
+      console.log(`🔍 [MODIFICAR-RESERVA] Buscando mesa para modificación: ${nuevasPersonas} personas el ${nuevaFecha} a las ${nuevaHora}`);
       
-      if (mesaQuery.rows.length === 0) {
+      // Usar el sistema centralizado de búsqueda de mesas disponibles
+      const mesasDisponibles = await buscarMesasDisponibles(
+        pool, 
+        nuevaFecha, 
+        nuevaHora, 
+        nuevasPersonas, 
+        duracionReserva, 
+        duracionPorDefecto
+      );
+      
+      // Filtrar las mesas disponibles según el cambio
+      let mesasFiltradas = mesasDisponibles;
+      
+      // Si no cambia el número de personas y la mesa actual tiene capacidad, preferirla
+      if (nuevasPersonas === reserva.personas) {
+        const mesaActualDisponible = mesasDisponibles.find(m => m.id === reserva.mesa_id);
+        if (mesaActualDisponible) {
+          console.log(`✅ [MODIFICAR-RESERVA] Manteniendo mesa actual ${mesaActualDisponible.numero_mesa}`);
+          mesasFiltradas = [mesaActualDisponible];
+        }
+      } else {
+        // Si cambia el número de personas, verificar que las mesas tengan capacidad adecuada
+        console.log(`📊 [MODIFICAR-RESERVA] Cambio de ${reserva.personas} a ${nuevasPersonas} personas`);
+        // Las mesas ya vienen filtradas por capacidad desde buscarMesasDisponibles
+      }
+      
+      if (mesasFiltradas.length === 0) {
         await client.query('ROLLBACK');
+        
+        // Buscar alternativas para dar mejor información al usuario
+        const alternativas = await buscarHorariosAlternativos(
+          pool, 
+          null,
+          nuevaFecha, 
+          nuevaHora, 
+          nuevasPersonas, 
+          duracionReserva,
+          await obtenerHorarioDia(nuevaFecha),
+          duracionPorDefecto
+        );
+        
+        let mensajeAlternativas = "";
+        if (alternativas.length > 0) {
+          const horasAlternativas = alternativas.slice(0, 3).map(a => a.hora).join(', ');
+          mensajeAlternativas = ` Horarios disponibles: ${horasAlternativas}`;
+        }
+        
+        console.log(`❌ [MODIFICAR-RESERVA] Sin disponibilidad. ${alternativas.length} alternativas encontradas`);
+        
         return res.status(400).json({
           exito: false,
-          mensaje: "No hay disponibilidad para los nuevos datos"
+          mensaje: `No hay mesas disponibles para ${nuevasPersonas} personas el ${nuevaFecha} a las ${nuevaHora}.${mensajeAlternativas}`,
+          alternativas: alternativas.slice(0, 3)
         });
       }
       
-      cambios.mesa_id = mesaQuery.rows[0].id;
+      // Tomar la primera mesa disponible
+      const mesaAsignada = mesasFiltradas[0];
+      cambios.mesa_id = mesaAsignada.id;
+      
+      console.log(`✅ [MODIFICAR-RESERVA] Mesa ${mesaAsignada.numero_mesa} asignada (capacidad: ${mesaAsignada.capacidad})`);
     }
     
     // Actualizar reserva
