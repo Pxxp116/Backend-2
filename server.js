@@ -2257,9 +2257,28 @@ app.put('/api/modificar-reserva', async (req, res) => {
     
     // Si cambia fecha, hora o personas, verificar disponibilidad
     if (fecha || hora || personas) {
-      const nuevaFecha = fecha || reserva.fecha;
-      const nuevaHora = hora || reserva.hora;
+      // IMPORTANTE: Convertir fecha a formato YYYY-MM-DD si viene como objeto Date
+      const formatearFecha = (fechaParam) => {
+        if (fechaParam instanceof Date) {
+          return fechaParam.toISOString().split('T')[0];
+        }
+        return fechaParam;
+      };
+      
+      // Formatear hora a HH:MM si es necesario
+      const formatearHora = (horaParam) => {
+        if (typeof horaParam === 'object' && horaParam !== null) {
+          // Si es un objeto con horas y minutos
+          return `${String(horaParam.hours || 0).padStart(2, '0')}:${String(horaParam.minutes || 0).padStart(2, '0')}`;
+        }
+        return horaParam;
+      };
+      
+      const nuevaFecha = fecha || formatearFecha(reserva.fecha);
+      const nuevaHora = hora || formatearHora(reserva.hora);
       const nuevasPersonas = personas || reserva.personas;
+      
+      console.log(`🔍 [MODIFICAR-RESERVA] Datos formateados: fecha=${nuevaFecha}, hora=${nuevaHora}, personas=${nuevasPersonas}`);
       
       // VALIDAR HORARIO SI CAMBIA FECHA U HORA
       if (fecha || hora) {
