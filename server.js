@@ -2300,13 +2300,15 @@ app.put('/api/modificar-reserva', async (req, res) => {
       console.log(`🔍 [MODIFICAR-RESERVA] Buscando mesa para modificación: ${nuevasPersonas} personas el ${nuevaFecha} a las ${nuevaHora}`);
       
       // Usar el sistema centralizado de búsqueda de mesas disponibles
+      // IMPORTANTE: Pasar el ID de la reserva actual para excluirla de la verificación
       const mesasDisponibles = await buscarMesasDisponibles(
         pool, 
         nuevaFecha, 
         nuevaHora, 
         nuevasPersonas, 
         duracionReserva, 
-        duracionPorDefecto
+        duracionPorDefecto,
+        reserva.id  // Excluir la reserva actual al verificar disponibilidad
       );
       
       // Filtrar las mesas disponibles según el cambio
@@ -2337,7 +2339,8 @@ app.put('/api/modificar-reserva', async (req, res) => {
           nuevasPersonas, 
           duracionReserva,
           await obtenerHorarioDia(nuevaFecha),
-          duracionPorDefecto
+          duracionPorDefecto,
+          reserva.id  // Excluir la reserva actual al buscar alternativas
         );
         
         let mensajeAlternativas = "";
