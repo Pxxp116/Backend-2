@@ -2319,9 +2319,10 @@ app.put('/api/modificar-reserva', async (req, res) => {
       console.log(`🔍 [MODIFICAR-RESERVA] Buscando mesa para modificación: ${nuevasPersonas} personas el ${nuevaFecha} a las ${nuevaHora}`);
       
       // Usar el sistema centralizado de búsqueda de mesas disponibles
-      // IMPORTANTE: Pasar el ID de la reserva actual para excluirla de la verificación
+      // IMPORTANTE: Usar client (no pool) para mantener contexto de transacción
+      // y pasar el ID de la reserva actual para excluirla de la verificación
       const mesasDisponibles = await buscarMesasDisponibles(
-        pool, 
+        client,  // CRÍTICO: Usar client para ver datos dentro de la transacción
         nuevaFecha, 
         nuevaHora, 
         nuevasPersonas, 
@@ -2351,7 +2352,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
         
         // Buscar alternativas para dar mejor información al usuario
         const alternativas = await buscarHorariosAlternativos(
-          pool, 
+          client,  // CRÍTICO: Usar client para mantener contexto de transacción
           null,
           nuevaFecha, 
           nuevaHora, 
