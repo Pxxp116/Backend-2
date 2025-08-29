@@ -2253,6 +2253,17 @@ app.put('/api/modificar-reserva', async (req, res) => {
     }
     
     const reserva = reservaActual.rows[0];
+    console.log(`📊 [MODIFICAR-DEBUG] Reserva encontrada:`, {
+      id: reserva.id,
+      codigo: reserva.codigo_reserva,
+      fecha: reserva.fecha,
+      hora: reserva.hora,
+      personas: reserva.personas,
+      mesa_id: reserva.mesa_id,
+      fecha_tipo: typeof reserva.fecha,
+      hora_tipo: typeof reserva.hora
+    });
+    
     const cambios = {};
     
     // Si cambia fecha, hora o personas, verificar disponibilidad
@@ -2279,6 +2290,7 @@ app.put('/api/modificar-reserva', async (req, res) => {
       const nuevasPersonas = personas || reserva.personas;
       
       console.log(`🔍 [MODIFICAR-RESERVA] Datos formateados: fecha=${nuevaFecha}, hora=${nuevaHora}, personas=${nuevasPersonas}`);
+      console.log(`🆔 [MODIFICAR-DEBUG] ID de reserva a excluir: ${reserva.id} (tipo: ${typeof reserva.id})`);
       
       // VALIDAR HORARIO SI CAMBIA FECHA U HORA
       if (fecha || hora) {

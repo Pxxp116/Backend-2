@@ -112,14 +112,19 @@ async function verificarSolapamiento(pool, mesaId, fecha, hora, duracion, reserv
     
     // Si hay una reserva a excluir (modificación)
     if (reservaIdExcluir) {
+      console.log(`   🔴 [EXCLUIR] Excluyendo reserva ID: ${reservaIdExcluir} de la verificación`);
       query += ` AND r.id != $4`;
       params.push(reservaIdExcluir);
+    } else {
+      console.log(`   ⚠️ [EXCLUIR] No se está excluyendo ninguna reserva (reservaIdExcluir: ${reservaIdExcluir})`);
     }
     
     query += ` ORDER BY r.hora`;
     
+    console.log(`   📝 [SQL-DEBUG] Query params:`, params);
     const result = await pool.query(query, params);
     const reservasExistentes = result.rows;
+    console.log(`   📊 [SQL-DEBUG] Reservas encontradas: ${reservasExistentes.length}`);
     
     if (esMesa3) {
       console.log(`   📊 Reservas existentes en mesa 3: ${reservasExistentes.length}`);
