@@ -49,9 +49,28 @@ app.use(express.json());
 // Servir archivos estáticos desde /uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Health check endpoint para Railway
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+// Health check endpoint para Railway - con sincronización inteligente
+app.get('/health', async (req, res) => {
+  try {
+    // Sincronizar datos si es necesario (sin forzar)
+    await sincronizarSiNecesario();
+    
+    // Verificar estado de la base de datos
+    await pool.query('SELECT 1');
+    
+    res.status(200).json({
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      data_age_seconds: archivoEspejo.edad_segundos || 0
+    });
+  } catch (error) {
+    console.error('❌ Error en health check:', error);
+    res.status(503).json({
+      status: 'ERROR',
+      timestamp: new Date().toISOString(),
+      error: 'Service temporarily unavailable'
+    });
+  }
 });
 
 // ===== CONFIGURACIÓN ANTI-CACHE PARA GPT =====
@@ -462,37 +481,90 @@ async function leerEspejoDesdeArchivo() {
   }
 }
 
-// Actualizar edad del espejo cada segundo
-setInterval(() => {
-  if (archivoEspejo.ultima_actualizacion) {
-    const edad = Math.floor((Date.now() - new Date(archivoEspejo.ultima_actualizacion)) / 1000);
-    archivoEspejo.edad_segundos = edad;
-  }
-}, 1000);
+// SetInterval deshabilitado para permitir sleep - edad se calcula on-demand
+// setInterval(() => {
+//   if (archivoEspejo.ultima_actualizacion) {
+//     const edad = Math.floor((Date.now() - new Date(archivoEspejo.ultima_actualizacion)) / 1000);
+//     archivoEspejo.edad_segundos = edad;
+//   }
+// }, 1000);
 
-// Actualizar Archivo Espejo cada 15 segundos
-cron.schedule('*/15 * * * * *', actualizarArchivoEspejo);
+// Cron jobs deshabilitados para permitir sleep - ahora usa sincronización on-demand
+// cron.schedule('*/15 * * * * *', actualizarArchivoEspejo);
 
 // ============================================
 // SINCRONIZACIÓN CONTINUA CON ESPEJO.JSON
 // ============================================
 
-// Opcional: Regenerar espejo.json cada 15 segundos para sincronización continua
-// Esto asegura que el archivo espejo.json siempre esté actualizado sin depender del Dashboard
-cron.schedule('*/15 * * * * *', async () => {
-  try {
-    await generarEspejo();
-  } catch (error) {
-    console.error('❌ Error en sincronización automática de espejo.json:', error);
+// Regeneración de espejo deshabilitada para permitir sleep - ahora usa sincronización on-demand
+// cron.schedule('*/15 * * * * *', async () => {
+//   try {
+//     await generarEspejo();
+//   } catch (error) {
+//     console.error('❌ Error en sincronización automática de espejo.json:', error);
+//   }
+// });
+
+// ============================================
+// SINCRONIZACIÓN ON-DEMAND
+// ============================================
+
+/**
+ * Verifica si los datos necesitan ser actualizados
+ * @param {number} maxAge - Edad máxima en segundos (default: 30)
+ * @returns {boolean} true si necesita actualización
+ */
+function necesitaActualizacion(maxAge = 30) {
+  if (!archivoEspejo.ultima_actualizacion) {
+    return true;
   }
-});
+  
+  const edad = Math.floor((Date.now() - new Date(archivoEspejo.ultima_actualizacion)) / 1000);
+  archivoEspejo.edad_segundos = edad; // Actualizar edad on-demand
+  
+  return edad > maxAge;
+}
+
+/**
+ * Sincroniza datos si es necesario
+ * @param {boolean} force - Forzar sincronización
+ * @returns {Promise<boolean>} true si se actualizó
+ */
+async function sincronizarSiNecesario(force = false) {
+  if (force || necesitaActualizacion()) {
+    console.log('🔄 Sincronizando datos on-demand...');
+    try {
+      await actualizarArchivoEspejo();
+      await generarEspejo();
+      console.log('✅ Sincronización completada');
+      return true;
+    } catch (error) {
+      console.error('❌ Error en sincronización on-demand:', error);
+      return false;
+    }
+  }
+  return false;
+}
 
 // ============================================
 // MIDDLEWARES DE VALIDACIÓN
 // ============================================
 
-// Verificar frescura del Archivo Espejo
+// Middleware de auto-sincronización on-demand
+const autoSincronizar = async (req, res, next) => {
+  // Sincronizar si los datos están desactualizados
+  await sincronizarSiNecesario();
+  next();
+};
+
+// Middleware legacy (mantenido para compatibilidad)  
 const verificarFrescura = async (req, res, next) => {
+  // Calcular edad on-demand
+  if (archivoEspejo.ultima_actualizacion) {
+    const edad = Math.floor((Date.now() - new Date(archivoEspejo.ultima_actualizacion)) / 1000);
+    archivoEspejo.edad_segundos = edad;
+  }
+  
   if (archivoEspejo.edad_segundos > 30) {
     const actualizado = await actualizarArchivoEspejo();
     if (!actualizado) {
@@ -590,7 +662,7 @@ app.get('/api/forzar-espejo', async (req, res) => {
 });
 
 // ENDPOINT PRINCIPAL: Obtener Archivo Espejo completo desde espejo.json
-app.get('/api/espejo', async (req, res) => {
+app.get('/api/espejo', autoSincronizar, async (req, res) => {
   try {
     // Forzar cabeceras anti-cache y status 200 OK
     res.set({
@@ -1727,7 +1799,7 @@ app.get('/api/horarios-disponibles', verificarFrescura, async (req, res) => {
 });
 
 // Ver menú con filtros opcionales
-app.get('/api/ver-menu', verificarFrescura, (req, res) => {
+app.get('/api/ver-menu', autoSincronizar, (req, res) => {
   const { categoria, disponible, vegetariano, alergeno } = req.query;
   let menu = JSON.parse(JSON.stringify(archivoEspejo.menu));
   
@@ -1769,7 +1841,7 @@ app.get('/api/ver-menu', verificarFrescura, (req, res) => {
 });
 
 // Buscar mesa disponible (ENDPOINT CLAVE PARA RESERVAS)
-app.post('/api/buscar-mesa', async (req, res) => {
+app.post('/api/buscar-mesa', autoSincronizar, async (req, res) => {
   // NO usar valor por defecto hardcodeado - obtener de políticas
   const { fecha, hora, personas, duracion } = req.body;
   
@@ -3708,7 +3780,7 @@ app.post('/api/admin/menu/plato/imagen', upload.single('imagen'), async (req, re
 });
 
 // Gestión de políticas
-app.get('/api/admin/politicas', async (req, res) => {
+app.get('/api/admin/politicas', autoSincronizar, async (req, res) => {
   try {
     const politicas = await pool.query('SELECT * FROM politicas LIMIT 1');
     res.json({
