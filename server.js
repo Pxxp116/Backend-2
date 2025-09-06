@@ -32,6 +32,11 @@ app.use(cors());
 app.use((req, res, next) => {
   console.log(`📨 ${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin || 'Sin origen'}`);
   
+  // Log para debug de sleep
+  if (typeof logActivity !== 'undefined') {
+    logActivity(`${req.method} ${req.path}`);
+  }
+  
   // Headers específicos para ChatGPT
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -4547,12 +4552,40 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
   }
 });
 
-// Manejar señal de terminación limpiamente
+// Manejar señal de terminación limpiamente con logs de debug
 process.on('SIGTERM', async () => {
-  console.log('📴 Cerrando conexiones para dormir...');
-  await pool.end();
+  console.log('📴 SIGTERM recibido - Railway iniciando proceso de sleep...');
+  console.log(`⏰ Timestamp: ${new Date().toISOString()}`);
+  console.log('🔄 Cerrando conexiones de base de datos...');
+  
+  try {
+    await pool.end();
+    console.log('✅ Pool de conexiones cerrado correctamente');
+  } catch (error) {
+    console.error('❌ Error cerrando pool:', error);
+  }
+  
+  console.log('💤 Backend entrando en sleep mode...');
   process.exit(0);
 });
+
+// Logs de debug para detectar actividad (sin timers que impidan sleep)
+let lastActivityTime = Date.now();
+let activityCount = 0;
+
+const logActivity = (source) => {
+  lastActivityTime = Date.now();
+  activityCount++;
+  console.log(`🔍 [DEBUG] Actividad detectada (${source}) - Count: ${activityCount} - ${new Date().toISOString()}`);
+  
+  // Log de inactividad solo cuando hay actividad
+  setTimeout(() => {
+    const timeSinceActivity = (Date.now() - lastActivityTime) / 1000;
+    if (timeSinceActivity >= 240) { // 4 minutos sin actividad
+      console.log(`⏱️  [SLEEP-READY] ${Math.floor(timeSinceActivity)}s sin actividad - Railway debería iniciar sleep...`);
+    }
+  }, 250000); // Check una sola vez después de 4+ minutos
+};
 
 // Arrancar servidor
 app.listen(PORT, async () => {
@@ -4585,9 +4618,4 @@ app.listen(PORT, async () => {
   console.log('✅ Sistema listo para recibir peticiones del GPT\n');
 });
 
-// Manejo de cierre graceful
-process.on('SIGTERM', () => {
-  console.log('Cerrando servidor...');
-  pool.end();
-  process.exit(0);
-});
+// Handler SIGTERM duplicado eliminado - ya existe uno optimizado arriba
