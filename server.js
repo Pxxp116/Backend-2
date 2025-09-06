@@ -49,6 +49,11 @@ app.use(express.json());
 // Servir archivos estáticos desde /uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Health check endpoint para Railway
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 // ===== CONFIGURACIÓN ANTI-CACHE PARA GPT =====
 // Desactivar ETag globalmente
 app.set('etag', false);
@@ -81,14 +86,18 @@ const isProduction = process.env.NODE_ENV === 'production' || process.env.DATABA
 
 let pool;
 if (process.env.DATABASE_URL) {
-  // Configuración para Railway/Producción
+  // Configuración para Railway/Producción - optimizada para sleep
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false },
+    // Configuración optimizada para sleep
+    max: 3,                      // Reducir máximo de conexiones
+    min: 0,                      // Permitir 0 conexiones
+    idleTimeoutMillis: 60000,    // Cerrar conexiones idle después de 1 min
+    connectionTimeoutMillis: 5000,
+    allowExitOnIdle: true        // Permitir que el proceso termine
   });
-  console.log('📦 Usando DATABASE_URL de Railway');
+  console.log('📦 Usando DATABASE_URL de Railway (optimizado para sleep)');
 } else {
   // Configuración para desarrollo local
   pool = new Pool({
@@ -4466,9 +4475,17 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
   }
 });
 
+// Manejar señal de terminación limpiamente
+process.on('SIGTERM', async () => {
+  console.log('📴 Cerrando conexiones para dormir...');
+  await pool.end();
+  process.exit(0);
+});
+
 // Arrancar servidor
 app.listen(PORT, async () => {
-  console.log(`\n🚀 GastroBot Backend API iniciado`);
+  console.log(`🌟 Backend despertó a las ${new Date().toISOString()}`);
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
   
   // Log de configuración del entorno
   logConfiguration();
