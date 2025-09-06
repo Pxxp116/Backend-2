@@ -12,6 +12,9 @@ const path = require('path');
 const multer = require('multer');
 require('dotenv').config();
 
+// Importar configuración de entorno dinámico
+const { config, getPublicUrl, logConfiguration } = require('./config/environment');
+
 // Importar sistema de validación centralizado
 const { 
   verificarSolapamiento, 
@@ -20,7 +23,7 @@ const {
 } = require('./utils/validacion-reservas');
 
 const app = express();
-const PORT = process.env.PORT || 3002;
+const PORT = config.port;
 
 // Middlewares - CORS simplificado para permitir todo (ChatGPT necesita esto)
 app.use(cors());
@@ -3667,12 +3670,8 @@ app.post('/api/admin/menu/plato/imagen', upload.single('imagen'), async (req, re
       });
     }
 
-    // Construir URL pública para la imagen
-    const baseUrl = process.env.NODE_ENV === 'production' 
-      ? (process.env.BASE_URL || 'https://backend-2-production-227a.up.railway.app')
-      : `http://localhost:${PORT}`;
-    
-    const imagenUrl = `${baseUrl}/uploads/images/${req.file.filename}`;
+    // Construir URL pública para la imagen usando configuración dinámica
+    const imagenUrl = getPublicUrl(`uploads/images/${req.file.filename}`);
     
     console.log(`📸 Imagen subida exitosamente: ${req.file.filename}`);
     console.log(`📍 URL pública generada: ${imagenUrl}`);
@@ -4470,7 +4469,11 @@ app.get('/api/debug/reservas/:fecha', async (req, res) => {
 // Arrancar servidor
 app.listen(PORT, async () => {
   console.log(`\n🚀 GastroBot Backend API iniciado`);
-  console.log(`📍 URL: http://localhost:${PORT}`);
+  
+  // Log de configuración del entorno
+  logConfiguration();
+  
+  console.log(`📍 URL: ${config.baseUrl}`);
   console.log(`📚 Documentación de endpoints:`);
   console.log(`   - GET  /api/espejo                  → Archivo espejo completo`);
   console.log(`   - POST /api/buscar-mesa             → Buscar disponibilidad`);
