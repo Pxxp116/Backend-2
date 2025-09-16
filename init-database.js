@@ -320,6 +320,32 @@ async function initDatabase() {
       );
 
       -- ==============================================
+      -- TABLA: PEDIDOS
+      -- ==============================================
+      CREATE TABLE IF NOT EXISTS pedidos (
+        id SERIAL PRIMARY KEY,
+        id_unico_pedido VARCHAR(8) UNIQUE NOT NULL,
+        cliente_nombre VARCHAR(100) NOT NULL,
+        cliente_telefono VARCHAR(20) NOT NULL,
+        cliente_id INTEGER REFERENCES clientes(id),
+        mesa_id INTEGER REFERENCES mesas(id),
+        detalles_pedido JSONB NOT NULL,
+        total DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        estado VARCHAR(20) DEFAULT 'pendiente',
+        notas TEXT,
+        fecha_pedido TIMESTAMP DEFAULT NOW(),
+        hora_estimada_entrega TIMESTAMP,
+        fecha_entrega TIMESTAMP,
+        origen VARCHAR(20) DEFAULT 'gpt',
+        cancelado BOOLEAN DEFAULT false,
+        motivo_cancelacion TEXT,
+        valoracion INTEGER CHECK (valoracion >= 1 AND valoracion <= 5),
+        comentario_valoracion TEXT,
+        creado_en TIMESTAMP DEFAULT NOW(),
+        actualizado_en TIMESTAMP DEFAULT NOW()
+      );
+
+      -- ==============================================
       -- TABLA: HISTORIAL DE CAMBIOS
       -- ==============================================
       CREATE TABLE IF NOT EXISTS historial_cambios (
@@ -353,6 +379,10 @@ async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_clientes_telefono ON clientes(telefono);
       CREATE INDEX IF NOT EXISTS idx_platos_categoria ON platos(categoria_id);
       CREATE INDEX IF NOT EXISTS idx_platos_disponible ON platos(disponible);
+      CREATE INDEX IF NOT EXISTS idx_pedidos_fecha ON pedidos(fecha_pedido DESC);
+      CREATE INDEX IF NOT EXISTS idx_pedidos_estado ON pedidos(estado);
+      CREATE INDEX IF NOT EXISTS idx_pedidos_cliente_telefono ON pedidos(cliente_telefono);
+      CREATE INDEX IF NOT EXISTS idx_pedidos_id_unico ON pedidos(id_unico_pedido);
     `);
 
     console.log('✅ Tablas creadas correctamente');

@@ -4587,6 +4587,222 @@ const logActivity = (source) => {
   }, 250000); // Check una sola vez después de 4+ minutos
 };
 
+// ============================================
+// ENDPOINTS DE PEDIDOS
+// ============================================
+
+// Crear pedido
+app.post('/api/crear-pedido', async (req, res) => {
+  const {
+    cliente_nombre,
+    cliente_telefono,
+    detalles_pedido,
+    total,
+    mesa_id,
+    notas,
+    origen = 'gpt'
+  } = req.body;
+
+  // Validación
+  if (!cliente_nombre || !cliente_telefono || !detalles_pedido || !total) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Faltan datos obligatorios: nombre del cliente, teléfono, detalles del pedido y total"
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verificar o crear cliente
+    let cliente_id = null;
+    const clienteExistente = await client.query(
+      'SELECT id FROM clientes WHERE telefono = $1',
+      [cliente_telefono]
+    );
+
+    if (clienteExistente.rows.length > 0) {
+      cliente_id = clienteExistente.rows[0].id;
+    } else {
+      // Crear nuevo cliente
+      const nuevoCliente = await client.query(
+        'INSERT INTO clientes (nombre, telefono) VALUES ($1, $2) RETURNING id',
+        [cliente_nombre, cliente_telefono]
+      );
+      cliente_id = nuevoCliente.rows[0].id;
+    }
+
+    // Generar ID único de pedido (8 dígitos)
+    const idUnicoPedido = Math.random().toString(36).substring(2, 10).toUpperCase();
+
+    // Crear pedido
+    const pedidoQuery = await client.query(`
+      INSERT INTO pedidos (
+        id_unico_pedido, cliente_nombre, cliente_telefono, cliente_id,
+        mesa_id, detalles_pedido, total, notas, origen, creado_en
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      RETURNING *
+    `, [idUnicoPedido, cliente_nombre, cliente_telefono, cliente_id,
+        mesa_id, JSON.stringify(detalles_pedido), total, notas, origen]);
+
+    const pedido = pedidoQuery.rows[0];
+
+    await client.query('COMMIT');
+
+    // Actualizar archivo espejo
+    await actualizarArchivoEspejo();
+
+    res.json({
+      exito: true,
+      pedido: pedido,
+      id_pedido: idUnicoPedido,
+      mensaje: `¡Pedido confirmado! ID: ${idUnicoPedido}. Total: ${total}€`
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error creando pedido:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al procesar el pedido. Por favor, inténtalo de nuevo."
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Listar pedidos (para el dashboard)
+app.get('/api/admin/pedidos', async (req, res) => {
+  try {
+    const { estado, fecha } = req.query;
+
+    let query = `
+      SELECT p.*, m.numero_mesa, m.zona
+      FROM pedidos p
+      LEFT JOIN mesas m ON p.mesa_id = m.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (estado) {
+      query += ` AND p.estado = $${params.length + 1}`;
+      params.push(estado);
+    }
+
+    if (fecha) {
+      query += ` AND DATE(p.fecha_pedido) = $${params.length + 1}`;
+      params.push(fecha);
+    } else {
+      // Por defecto, mostrar pedidos de hoy
+      query += ` AND DATE(p.fecha_pedido) = CURRENT_DATE`;
+    }
+
+    query += ` ORDER BY p.fecha_pedido DESC`;
+
+    const resultado = await pool.query(query, params);
+
+    res.json({
+      exito: true,
+      pedidos: resultado.rows
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo pedidos:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al obtener pedidos"
+    });
+  }
+});
+
+// Actualizar estado de pedido
+app.put('/api/admin/pedidos/:id/estado', async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+
+  const estadosValidos = ['pendiente', 'preparacion', 'entregado', 'cancelado'];
+
+  if (!estadosValidos.includes(estado)) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: "Estado inválido. Debe ser: pendiente, preparacion, entregado o cancelado"
+    });
+  }
+
+  try {
+    const fechaEntrega = estado === 'entregado' ? 'NOW()' : 'NULL';
+
+    const resultado = await pool.query(
+      `UPDATE pedidos
+       SET estado = $1,
+           fecha_entrega = ${fechaEntrega},
+           actualizado_en = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [estado, id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: "Pedido no encontrado"
+      });
+    }
+
+    // Actualizar archivo espejo
+    await actualizarArchivoEspejo();
+
+    res.json({
+      exito: true,
+      pedido: resultado.rows[0],
+      mensaje: `Estado del pedido actualizado a: ${estado}`
+    });
+
+  } catch (error) {
+    console.error('Error actualizando estado del pedido:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al actualizar el estado del pedido"
+    });
+  }
+});
+
+// Obtener pedido específico por ID
+app.get('/api/pedidos/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const resultado = await pool.query(
+      `SELECT p.*, m.numero_mesa, m.zona
+       FROM pedidos p
+       LEFT JOIN mesas m ON p.mesa_id = m.id
+       WHERE p.id_unico_pedido = $1`,
+      [id]
+    );
+
+    if (resultado.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: "Pedido no encontrado"
+      });
+    }
+
+    res.json({
+      exito: true,
+      pedido: resultado.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo pedido:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: "Error al obtener el pedido"
+    });
+  }
+});
+
 // Arrancar servidor
 app.listen(PORT, async () => {
   console.log(`🌟 Backend despertó a las ${new Date().toISOString()}`);
@@ -4609,7 +4825,11 @@ app.listen(PORT, async () => {
   console.log(`   - GET  /api/admin/horarios          → Obtener horarios del restaurante`);
   console.log(`   - PUT  /api/admin/horarios          → Actualizar horarios del restaurante`);
   console.log(`   - PUT  /api/admin/horarios/:dia     → Actualizar horario de un día específico`);
-  console.log(`   - GET  /api/admin/*                 → Endpoints del dashboard\n`);
+  console.log(`   - GET  /api/admin/*                 → Endpoints del dashboard`);
+  console.log(`   - POST /api/crear-pedido            → Crear nuevo pedido`);
+  console.log(`   - GET  /api/admin/pedidos           → Listar pedidos para dashboard`);
+  console.log(`   - PUT  /api/admin/pedidos/:id/estado→ Actualizar estado de pedido`);
+  console.log(`   - GET  /api/pedidos/:id             → Obtener pedido específico\n`);
   
   await inicializarDB();
   await actualizarArchivoEspejo();
