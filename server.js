@@ -280,14 +280,24 @@ async function actualizarArchivoEspejo() {
     
     // Obtener promociones/eventos activos
     const promocionesQuery = await pool.query(`
-      SELECT * FROM promociones 
-      WHERE fecha_inicio <= CURRENT_DATE 
+      SELECT * FROM promociones
+      WHERE fecha_inicio <= CURRENT_DATE
         AND fecha_fin >= CURRENT_DATE
         AND activo = true
       ORDER BY fecha_inicio
     `);
     archivoEspejo.promociones = promocionesQuery.rows;
-    
+
+    // Obtener pedidos del día actual
+    const pedidosQuery = await pool.query(`
+      SELECT p.*, m.numero_mesa, m.zona
+      FROM pedidos p
+      LEFT JOIN mesas m ON p.mesa_id = m.id
+      WHERE DATE(p.fecha_pedido) = CURRENT_DATE
+      ORDER BY p.fecha_pedido DESC
+    `);
+    archivoEspejo.pedidos = pedidosQuery.rows;
+
     // Actualizar marcas de tiempo
     archivoEspejo.ultima_actualizacion = new Date().toISOString();
     archivoEspejo.edad_segundos = 0;
@@ -2902,13 +2912,25 @@ app.get('/api/admin/estado-sistema', async (req, res) => {
   try {
     // Estadísticas del día
     const estadisticasHoy = await pool.query(`
-      SELECT 
+      SELECT
         COUNT(CASE WHEN estado = 'confirmada' THEN 1 END) as reservas_confirmadas,
         COUNT(CASE WHEN estado = 'cancelada' THEN 1 END) as reservas_canceladas,
         COUNT(CASE WHEN estado = 'no_show' THEN 1 END) as no_shows,
         SUM(CASE WHEN estado = 'confirmada' THEN personas ELSE 0 END) as personas_esperadas
       FROM reservas
       WHERE fecha = CURRENT_DATE
+    `);
+
+    // Estadísticas de pedidos del día
+    const estadisticasPedidos = await pool.query(`
+      SELECT
+        COUNT(*) as total_pedidos,
+        COUNT(CASE WHEN estado = 'pendiente' THEN 1 END) as pedidos_pendientes,
+        COUNT(CASE WHEN estado = 'en_preparacion' THEN 1 END) as pedidos_en_preparacion,
+        COUNT(CASE WHEN estado = 'entregado' THEN 1 END) as pedidos_entregados,
+        COALESCE(SUM(CASE WHEN estado != 'cancelado' THEN total ELSE 0 END), 0) as ingresos_pedidos
+      FROM pedidos
+      WHERE DATE(fecha_pedido) = CURRENT_DATE
     `);
     
     // Mesas ocupadas ahora
@@ -2943,10 +2965,14 @@ app.get('/api/admin/estado-sistema', async (req, res) => {
         estado: archivoEspejo.edad_segundos <= 30 ? 'fresco' : 'obsoleto'
       },
       hoy: estadisticasHoy.rows[0],
+      pedidos: estadisticasPedidos.rows[0],
       mesas_ocupadas: parseInt(mesasOcupadas.rows[0].ocupadas),
       mesas_totales: parseInt(totalMesas.rows[0].total),
       ocupacion_porcentaje: Math.round((mesasOcupadas.rows[0].ocupadas / totalMesas.rows[0].total) * 100),
-      proximas_reservas: proximasReservas.rows
+      proximas_reservas: proximasReservas.rows,
+      reservas_hoy: estadisticasHoy.rows[0].reservas_confirmadas,
+      pedidos_pendientes: parseInt(estadisticasPedidos.rows[0].pedidos_pendientes),
+      pedidos_en_preparacion: parseInt(estadisticasPedidos.rows[0].pedidos_en_preparacion)
     };
     
     res.json({
