@@ -4829,6 +4829,571 @@ app.get('/api/pedidos/:id', async (req, res) => {
   }
 });
 
+// ============================================
+// ENDPOINTS DE SPLITQR
+// ============================================
+
+// Abrir nueva cuenta para mesa
+app.post('/api/splitqr/mesa/:id/abrir-cuenta', async (req, res) => {
+  const { id: mesa_id } = req.params;
+  const { notas = '' } = req.body;
+
+  console.log(`📱 [SPLITQR] Abriendo cuenta para Mesa ${mesa_id}`);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verificar que la mesa existe
+    const mesaCheck = await client.query('SELECT id, numero FROM mesas WHERE id = $1', [mesa_id]);
+    if (mesaCheck.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Mesa no encontrada'
+      });
+    }
+
+    // Verificar que no hay cuenta activa para esta mesa
+    const cuentaExistente = await client.query(
+      'SELECT id FROM cuentas_mesa WHERE mesa_id = $1 AND estado IN ($2, $3)',
+      [mesa_id, 'abierta', 'parcial']
+    );
+
+    if (cuentaExistente.rows.length > 0) {
+      return res.status(400).json({
+        exito: false,
+        mensaje: 'Ya existe una cuenta activa para esta mesa'
+      });
+    }
+
+    // Generar QR ID único
+    const qrCodeId = `QR${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+
+    // Crear nueva cuenta
+    const nuevaCuenta = await client.query(`
+      INSERT INTO cuentas_mesa (mesa_id, qr_code_id, notas)
+      VALUES ($1, $2, $3)
+      RETURNING *
+    `, [mesa_id, qrCodeId, notas]);
+
+    await client.query('COMMIT');
+
+    const mesa = mesaCheck.rows[0];
+    const cuenta = nuevaCuenta.rows[0];
+
+    console.log(`✅ [SPLITQR] Cuenta abierta - Mesa ${mesa.numero}, QR: ${cuenta.qr_code_id}`);
+
+    res.json({
+      exito: true,
+      mensaje: `Cuenta abierta para Mesa ${mesa.numero}`,
+      cuenta: {
+        id: cuenta.id,
+        mesa_id: cuenta.mesa_id,
+        mesa_numero: mesa.numero,
+        qr_code_id: cuenta.qr_code_id,
+        estado: cuenta.estado,
+        total: parseFloat(cuenta.total),
+        pagado: parseFloat(cuenta.pagado),
+        pendiente: parseFloat(cuenta.pendiente),
+        fecha_apertura: cuenta.fecha_apertura
+      }
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [SPLITQR] Error abriendo cuenta:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Obtener cuenta activa de una mesa
+app.get('/api/splitqr/mesa/:id/cuenta', async (req, res) => {
+  const { id: mesa_id } = req.params;
+
+  try {
+    const result = await pool.query(`
+      SELECT
+        cm.*,
+        m.numero as mesa_numero,
+        (SELECT COUNT(*) FROM items_cuenta WHERE cuenta_mesa_id = cm.id) as items_count
+      FROM cuentas_mesa cm
+      JOIN mesas m ON cm.mesa_id = m.id
+      WHERE cm.mesa_id = $1 AND cm.estado IN ('abierta', 'parcial')
+      ORDER BY cm.fecha_apertura DESC
+      LIMIT 1
+    `, [mesa_id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'No hay cuenta activa para esta mesa'
+      });
+    }
+
+    const cuenta = result.rows[0];
+
+    // Obtener items de la cuenta
+    const items = await pool.query(`
+      SELECT * FROM items_cuenta
+      WHERE cuenta_mesa_id = $1
+      ORDER BY fecha_agregado DESC
+    `, [cuenta.id]);
+
+    res.json({
+      exito: true,
+      cuenta: {
+        id: cuenta.id,
+        mesa_id: cuenta.mesa_id,
+        mesa_numero: cuenta.mesa_numero,
+        qr_code_id: cuenta.qr_code_id,
+        estado: cuenta.estado,
+        total: parseFloat(cuenta.total),
+        subtotal: parseFloat(cuenta.subtotal),
+        descuento: parseFloat(cuenta.descuento),
+        pagado: parseFloat(cuenta.pagado),
+        pendiente: parseFloat(cuenta.pendiente),
+        items_count: parseInt(cuenta.items_count),
+        items: items.rows.map(item => ({
+          id: item.id,
+          nombre: item.producto_nombre,
+          descripcion: item.producto_descripcion,
+          categoria: item.categoria_nombre,
+          precio: parseFloat(item.precio_unitario),
+          cantidad: item.cantidad,
+          total: parseFloat(item.precio_total),
+          pagado: item.pagado,
+          pagado_por: item.pagado_por,
+          fecha_agregado: item.fecha_agregado
+        })),
+        fecha_apertura: cuenta.fecha_apertura,
+        notas: cuenta.notas
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [SPLITQR] Error obteniendo cuenta:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  }
+});
+
+// Agregar producto a cuenta
+app.post('/api/splitqr/cuenta/:id/item', async (req, res) => {
+  const { id: cuenta_id } = req.params;
+  const {
+    producto_id = null,
+    producto_nombre,
+    producto_descripcion = '',
+    categoria_nombre = 'Otros',
+    precio_unitario,
+    cantidad = 1,
+    agregado_por = 'dashboard'
+  } = req.body;
+
+  if (!producto_nombre || !precio_unitario) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: 'Faltan datos obligatorios: nombre y precio del producto'
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verificar que la cuenta existe y está activa
+    const cuentaCheck = await client.query(
+      'SELECT id, mesa_id, estado FROM cuentas_mesa WHERE id = $1 AND estado IN ($2, $3)',
+      [cuenta_id, 'abierta', 'parcial']
+    );
+
+    if (cuentaCheck.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada o no está activa'
+      });
+    }
+
+    const precio_total = parseFloat(precio_unitario) * parseInt(cantidad);
+
+    // Agregar item a la cuenta
+    const nuevoItem = await client.query(`
+      INSERT INTO items_cuenta (
+        cuenta_mesa_id, producto_id, producto_nombre, producto_descripcion,
+        categoria_nombre, precio_unitario, cantidad, precio_total, agregado_por
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `, [
+      cuenta_id, producto_id, producto_nombre, producto_descripcion,
+      categoria_nombre, precio_unitario, cantidad, precio_total, agregado_por
+    ]);
+
+    await client.query('COMMIT');
+
+    console.log(`✅ [SPLITQR] Producto agregado - Cuenta ${cuenta_id}: ${producto_nombre} x${cantidad}`);
+
+    res.json({
+      exito: true,
+      mensaje: 'Producto agregado a la cuenta',
+      item: {
+        id: nuevoItem.rows[0].id,
+        nombre: nuevoItem.rows[0].producto_nombre,
+        descripcion: nuevoItem.rows[0].producto_descripcion,
+        categoria: nuevoItem.rows[0].categoria_nombre,
+        precio: parseFloat(nuevoItem.rows[0].precio_unitario),
+        cantidad: nuevoItem.rows[0].cantidad,
+        total: parseFloat(nuevoItem.rows[0].precio_total),
+        fecha_agregado: nuevoItem.rows[0].fecha_agregado
+      }
+    });
+
+    // Sincronizar espejo después de cambios
+    setTimeout(() => actualizarArchivoEspejo(), 1000);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [SPLITQR] Error agregando producto:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Obtener datos para landing de pago (usando QR ID)
+app.get('/api/splitqr/qr/:qrId', async (req, res) => {
+  const { qrId } = req.params;
+
+  console.log(`📱 [SPLITQR] Consultando QR: ${qrId}`);
+
+  try {
+    // Obtener cuenta por QR ID
+    const cuentaResult = await pool.query(`
+      SELECT
+        cm.*,
+        m.numero as mesa_numero,
+        m.capacidad as mesa_capacidad
+      FROM cuentas_mesa cm
+      JOIN mesas m ON cm.mesa_id = m.id
+      WHERE cm.qr_code_id = $1 AND cm.estado IN ('abierta', 'parcial')
+    `, [qrId]);
+
+    if (cuentaResult.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'QR no válido o cuenta no activa'
+      });
+    }
+
+    const cuenta = cuentaResult.rows[0];
+
+    // Obtener items de la cuenta
+    const itemsResult = await pool.query(`
+      SELECT * FROM items_cuenta
+      WHERE cuenta_mesa_id = $1
+      ORDER BY fecha_agregado ASC
+    `, [cuenta.id]);
+
+    // Obtener información del restaurante
+    const restauranteResult = await pool.query(`
+      SELECT * FROM restaurante_info LIMIT 1
+    `);
+
+    const restaurante = restauranteResult.rows[0] || {
+      nombre: 'GastroBot Restaurant',
+      tipo_cocina: 'Mediterránea',
+      direccion: '',
+      telefono: '',
+      email: ''
+    };
+
+    res.json({
+      exito: true,
+      data: {
+        mesa: {
+          id: cuenta.mesa_id,
+          numero: cuenta.mesa_numero,
+          capacidad: cuenta.mesa_capacidad
+        },
+        cuenta: {
+          id: cuenta.id,
+          qr_code_id: cuenta.qr_code_id,
+          estado: cuenta.estado,
+          total: parseFloat(cuenta.total),
+          subtotal: parseFloat(cuenta.subtotal),
+          descuento: parseFloat(cuenta.descuento),
+          pagado: parseFloat(cuenta.pagado),
+          pendiente: parseFloat(cuenta.pendiente),
+          items: itemsResult.rows.map(item => ({
+            id: item.id,
+            name: item.producto_nombre,
+            descripcion: item.producto_descripcion,
+            category: item.categoria_nombre,
+            price: parseFloat(item.precio_unitario),
+            cantidad: item.cantidad,
+            total: parseFloat(item.precio_total),
+            pagado: item.pagado,
+            pagado_por: item.pagado_por
+          })),
+          tax: 0,
+          discount: parseFloat(cuenta.descuento),
+          status: cuenta.estado
+        },
+        restaurante: {
+          nombre: restaurante.nombre,
+          tipo_cocina: restaurante.tipo_cocina,
+          direccion: restaurante.direccion,
+          telefono: restaurante.telefono,
+          email: restaurante.email
+        },
+        metadata: {
+          source: 'splitqr_api',
+          timestamp: new Date().toISOString()
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [SPLITQR] Error consultando QR:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  }
+});
+
+// Obtener estado de mesas para dashboard
+app.get('/api/splitqr/estado-mesas', async (req, res) => {
+  try {
+    // Obtener todas las mesas
+    const mesasResult = await pool.query('SELECT * FROM mesas ORDER BY numero');
+
+    // Obtener cuentas activas
+    const cuentasResult = await pool.query(`
+      SELECT
+        cm.*,
+        m.numero as mesa_numero,
+        (SELECT COUNT(*) FROM items_cuenta WHERE cuenta_mesa_id = cm.id) as items_count
+      FROM cuentas_mesa cm
+      JOIN mesas m ON cm.mesa_id = m.id
+      WHERE cm.estado IN ('abierta', 'parcial', 'pagada')
+      ORDER BY cm.fecha_apertura DESC
+    `);
+
+    // Calcular estadísticas
+    const estadisticas = {
+      mesasConCuenta: cuentasResult.rows.length,
+      totalRecaudado: cuentasResult.rows.reduce((sum, c) => sum + parseFloat(c.pagado), 0),
+      pagosPendientes: cuentasResult.rows.filter(c => parseFloat(c.pendiente) > 0).length,
+      pagosCompletados: cuentasResult.rows.filter(c => parseFloat(c.pendiente) === 0).length
+    };
+
+    res.json({
+      exito: true,
+      data: {
+        mesas: mesasResult.rows.map(mesa => ({
+          id: mesa.id,
+          numero: mesa.numero,
+          capacidad: mesa.capacidad,
+          estado: mesa.estado || 'disponible',
+          tiene_cuenta: cuentasResult.rows.some(c => c.mesa_id === mesa.id)
+        })),
+        cuentas_activas: cuentasResult.rows.map(cuenta => ({
+          id: cuenta.id,
+          mesa_id: cuenta.mesa_id,
+          mesa_numero: cuenta.mesa_numero,
+          qr_code_id: cuenta.qr_code_id,
+          estado: cuenta.estado,
+          total: parseFloat(cuenta.total),
+          pagado: parseFloat(cuenta.pagado),
+          pendiente: parseFloat(cuenta.pendiente),
+          items_count: parseInt(cuenta.items_count),
+          fecha_apertura: cuenta.fecha_apertura
+        })),
+        estadisticas
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [SPLITQR] Error obteniendo estado:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  }
+});
+
+// Procesar pago dividido
+app.post('/api/splitqr/procesar-pago', async (req, res) => {
+  const {
+    sessionId,
+    mesaId,
+    qrCodeId,
+    customerInfo,
+    amount,
+    splitMode,
+    participants,
+    selectedItems,
+    paymentMethod
+  } = req.body;
+
+  if (!sessionId || !qrCodeId || !customerInfo || !amount) {
+    return res.status(400).json({
+      exito: false,
+      mensaje: 'Faltan datos obligatorios para el pago'
+    });
+  }
+
+  console.log(`💳 [SPLITQR] Procesando pago - QR: ${qrCodeId}, Cliente: ${customerInfo.name}, Monto: €${amount}`);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Obtener cuenta activa
+    const cuentaResult = await pool.query(
+      'SELECT * FROM cuentas_mesa WHERE qr_code_id = $1 AND estado IN ($2, $3)',
+      [qrCodeId, 'abierta', 'parcial']
+    );
+
+    if (cuentaResult.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada o no está activa'
+      });
+    }
+
+    const cuenta = cuentaResult.rows[0];
+
+    // Simular procesamiento de pago (en producción aquí iría la integración con gateway de pago)
+    const transaction_id = `TXN_${Date.now()}_${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+    // Para simulación, siempre exitoso excepto 5% de casos
+    const pagoExitoso = Math.random() > 0.05;
+    const estado = pagoExitoso ? 'completado' : 'fallido';
+
+    // Registrar pago parcial
+    const nuevoPago = await client.query(`
+      INSERT INTO pagos_parciales (
+        cuenta_mesa_id, session_id, cliente_nombre, cliente_telefono,
+        monto, metodo_pago, tipo_division, items_pagados, estado, transaction_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *
+    `, [
+      cuenta.id,
+      sessionId,
+      customerInfo.name,
+      customerInfo.phone || '',
+      amount,
+      paymentMethod,
+      splitMode,
+      selectedItems ? JSON.stringify(selectedItems) : null,
+      estado,
+      transaction_id
+    ]);
+
+    if (pagoExitoso) {
+      // Marcar items como pagados si es división por items
+      if (splitMode === 'items' && selectedItems && selectedItems.length > 0) {
+        await client.query(`
+          UPDATE items_cuenta
+          SET pagado = true, pagado_por = $1
+          WHERE id = ANY($2) AND cuenta_mesa_id = $3
+        `, [customerInfo.name, selectedItems, cuenta.id]);
+      }
+    }
+
+    await client.query('COMMIT');
+
+    if (pagoExitoso) {
+      console.log(`✅ [SPLITQR] Pago procesado exitosamente - ${transaction_id}`);
+    } else {
+      console.log(`❌ [SPLITQR] Pago fallido simulado - ${transaction_id}`);
+    }
+
+    res.json({
+      exito: pagoExitoso,
+      mensaje: pagoExitoso ? 'Pago procesado correctamente' : 'Error al procesar el pago',
+      data: {
+        transactionId: transaction_id,
+        estado,
+        timestamp: new Date().toISOString(),
+        simulated: true
+      }
+    });
+
+    // Sincronizar espejo después de cambios
+    setTimeout(() => actualizarArchivoEspejo(), 1000);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [SPLITQR] Error procesando pago:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Cerrar cuenta
+app.put('/api/splitqr/cuenta/:id/cerrar', async (req, res) => {
+  const { id: cuenta_id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verificar que la cuenta existe
+    const cuentaCheck = await client.query('SELECT * FROM cuentas_mesa WHERE id = $1', [cuenta_id]);
+    if (cuentaCheck.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada'
+      });
+    }
+
+    // Cerrar cuenta
+    await client.query(`
+      UPDATE cuentas_mesa
+      SET estado = 'cerrada', fecha_cierre = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `, [cuenta_id]);
+
+    await client.query('COMMIT');
+
+    console.log(`✅ [SPLITQR] Cuenta ${cuenta_id} cerrada`);
+
+    res.json({
+      exito: true,
+      mensaje: 'Cuenta cerrada correctamente'
+    });
+
+    // Sincronizar espejo después de cambios
+    setTimeout(() => actualizarArchivoEspejo(), 1000);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [SPLITQR] Error cerrando cuenta:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  } finally {
+    client.release();
+  }
+});
+
 // Arrancar servidor
 app.listen(PORT, async () => {
   console.log(`🌟 Backend despertó a las ${new Date().toISOString()}`);

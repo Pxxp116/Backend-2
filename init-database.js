@@ -571,6 +571,161 @@ async function initDatabase() {
 
       console.log('✅ Migración de columnas completada');
 
+    // =============================================
+    // MIGRACIÓN SPLITQR - NUEVAS TABLAS
+    // =============================================
+    console.log('📱 Creando tablas para SplitQR...');
+
+    // 1. Tabla para gestionar cuentas de mesa
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cuentas_mesa (
+        id SERIAL PRIMARY KEY,
+        mesa_id INTEGER NOT NULL REFERENCES mesas(id) ON DELETE CASCADE,
+        qr_code_id VARCHAR(100) UNIQUE NOT NULL,
+        fecha_apertura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        fecha_cierre TIMESTAMP NULL,
+        estado VARCHAR(20) DEFAULT 'abierta',
+        subtotal DECIMAL(10,2) DEFAULT 0.00,
+        descuento DECIMAL(10,2) DEFAULT 0.00,
+        total DECIMAL(10,2) DEFAULT 0.00,
+        pagado DECIMAL(10,2) DEFAULT 0.00,
+        pendiente DECIMAL(10,2) DEFAULT 0.00,
+        notas TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 2. Tabla para items/productos agregados a la cuenta de una mesa
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS items_cuenta (
+        id SERIAL PRIMARY KEY,
+        cuenta_mesa_id INTEGER NOT NULL REFERENCES cuentas_mesa(id) ON DELETE CASCADE,
+        producto_id INTEGER NULL,
+        producto_nombre VARCHAR(255) NOT NULL,
+        producto_descripcion TEXT,
+        categoria_nombre VARCHAR(100),
+        precio_unitario DECIMAL(10,2) NOT NULL,
+        cantidad INTEGER DEFAULT 1,
+        precio_total DECIMAL(10,2) NOT NULL,
+        agregado_por VARCHAR(100) DEFAULT 'dashboard',
+        fecha_agregado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        pagado BOOLEAN DEFAULT FALSE,
+        pagado_por VARCHAR(255) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 3. Tabla para registrar pagos parciales
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pagos_parciales (
+        id SERIAL PRIMARY KEY,
+        cuenta_mesa_id INTEGER NOT NULL REFERENCES cuentas_mesa(id) ON DELETE CASCADE,
+        session_id VARCHAR(100) NOT NULL,
+        cliente_nombre VARCHAR(255) NOT NULL,
+        cliente_telefono VARCHAR(20),
+        monto DECIMAL(10,2) NOT NULL,
+        metodo_pago VARCHAR(50) DEFAULT 'tarjeta',
+        tipo_division VARCHAR(20) DEFAULT 'igual',
+        items_pagados TEXT,
+        estado VARCHAR(20) DEFAULT 'pendiente',
+        fecha_pago TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        transaction_id VARCHAR(100),
+        payment_gateway_response TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 4. Índices para optimizar consultas
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_cuentas_mesa_mesa_id ON cuentas_mesa(mesa_id);
+      CREATE INDEX IF NOT EXISTS idx_cuentas_mesa_qr_code ON cuentas_mesa(qr_code_id);
+      CREATE INDEX IF NOT EXISTS idx_cuentas_mesa_estado ON cuentas_mesa(estado);
+      CREATE INDEX IF NOT EXISTS idx_items_cuenta_mesa_id ON items_cuenta(cuenta_mesa_id);
+      CREATE INDEX IF NOT EXISTS idx_items_cuenta_pagado ON items_cuenta(pagado);
+      CREATE INDEX IF NOT EXISTS idx_pagos_parciales_cuenta_id ON pagos_parciales(cuenta_mesa_id);
+      CREATE INDEX IF NOT EXISTS idx_pagos_parciales_session ON pagos_parciales(session_id);
+      CREATE INDEX IF NOT EXISTS idx_pagos_parciales_estado ON pagos_parciales(estado);
+    `);
+
+    // 5. Triggers para mantener totales actualizados
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION actualizar_totales_cuenta()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        UPDATE cuentas_mesa
+        SET
+          subtotal = (
+            SELECT COALESCE(SUM(precio_total), 0)
+            FROM items_cuenta
+            WHERE cuenta_mesa_id = NEW.cuenta_mesa_id
+          ),
+          total = (
+            SELECT COALESCE(SUM(precio_total), 0)
+            FROM items_cuenta
+            WHERE cuenta_mesa_id = NEW.cuenta_mesa_id
+          ) - descuento,
+          pendiente = (
+            SELECT COALESCE(SUM(precio_total), 0)
+            FROM items_cuenta
+            WHERE cuenta_mesa_id = NEW.cuenta_mesa_id
+          ) - descuento - pagado,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = NEW.cuenta_mesa_id;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+
+    await pool.query(`
+      DROP TRIGGER IF EXISTS trigger_actualizar_totales ON items_cuenta;
+      CREATE TRIGGER trigger_actualizar_totales
+        AFTER INSERT OR UPDATE OR DELETE ON items_cuenta
+        FOR EACH ROW EXECUTE FUNCTION actualizar_totales_cuenta();
+    `);
+
+    // 6. Trigger para actualizar pagado cuando se registren pagos parciales
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION actualizar_pagado_cuenta()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.estado = 'completado' THEN
+          UPDATE cuentas_mesa
+          SET
+            pagado = (
+              SELECT COALESCE(SUM(monto), 0)
+              FROM pagos_parciales
+              WHERE cuenta_mesa_id = NEW.cuenta_mesa_id
+              AND estado = 'completado'
+            ),
+            pendiente = total - (
+              SELECT COALESCE(SUM(monto), 0)
+              FROM pagos_parciales
+              WHERE cuenta_mesa_id = NEW.cuenta_mesa_id
+              AND estado = 'completado'
+            ),
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = NEW.cuenta_mesa_id;
+
+          UPDATE cuentas_mesa
+          SET estado = 'pagada'
+          WHERE id = NEW.cuenta_mesa_id
+          AND pendiente <= 0.01;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+
+    await pool.query(`
+      DROP TRIGGER IF EXISTS trigger_actualizar_pagado ON pagos_parciales;
+      CREATE TRIGGER trigger_actualizar_pagado
+        AFTER INSERT OR UPDATE ON pagos_parciales
+        FOR EACH ROW EXECUTE FUNCTION actualizar_pagado_cuenta();
+    `);
+
+    console.log('✅ Migración SplitQR completada');
+
     console.log('🎉 Base de datos inicializada correctamente');
     
   } catch (error) {
