@@ -4846,7 +4846,7 @@ app.post('/api/splitqr/mesa/:id/abrir-cuenta', async (req, res) => {
     await client.query('BEGIN');
 
     // Verificar que la mesa existe
-    const mesaCheck = await client.query('SELECT id, numero FROM mesas WHERE id = $1', [mesa_id]);
+    const mesaCheck = await client.query('SELECT id, numero_mesa FROM mesas WHERE id = $1', [mesa_id]);
     if (mesaCheck.rows.length === 0) {
       return res.status(404).json({
         exito: false,
@@ -4882,15 +4882,15 @@ app.post('/api/splitqr/mesa/:id/abrir-cuenta', async (req, res) => {
     const mesa = mesaCheck.rows[0];
     const cuenta = nuevaCuenta.rows[0];
 
-    console.log(`✅ [SPLITQR] Cuenta abierta - Mesa ${mesa.numero}, QR: ${cuenta.qr_code_id}`);
+    console.log(`✅ [SPLITQR] Cuenta abierta - Mesa ${mesa.numero_mesa}, QR: ${cuenta.qr_code_id}`);
 
     res.json({
       exito: true,
-      mensaje: `Cuenta abierta para Mesa ${mesa.numero}`,
+      mensaje: `Cuenta abierta para Mesa ${mesa.numero_mesa}`,
       cuenta: {
         id: cuenta.id,
         mesa_id: cuenta.mesa_id,
-        mesa_numero: mesa.numero,
+        mesa_numero: mesa.numero_mesa,
         qr_code_id: cuenta.qr_code_id,
         estado: cuenta.estado,
         total: parseFloat(cuenta.total),
@@ -4920,7 +4920,7 @@ app.get('/api/splitqr/mesa/:id/cuenta', async (req, res) => {
     const result = await pool.query(`
       SELECT
         cm.*,
-        m.numero as mesa_numero,
+        m.numero_mesa as mesa_numero,
         (SELECT COUNT(*) FROM items_cuenta WHERE cuenta_mesa_id = cm.id) as items_count
       FROM cuentas_mesa cm
       JOIN mesas m ON cm.mesa_id = m.id
@@ -5081,7 +5081,7 @@ app.get('/api/splitqr/qr/:qrId', async (req, res) => {
     const cuentaResult = await pool.query(`
       SELECT
         cm.*,
-        m.numero as mesa_numero,
+        m.numero_mesa as mesa_numero,
         m.capacidad as mesa_capacidad
       FROM cuentas_mesa cm
       JOIN mesas m ON cm.mesa_id = m.id
@@ -5176,13 +5176,13 @@ app.get('/api/splitqr/qr/:qrId', async (req, res) => {
 app.get('/api/splitqr/estado-mesas', async (req, res) => {
   try {
     // Obtener todas las mesas
-    const mesasResult = await pool.query('SELECT * FROM mesas ORDER BY numero');
+    const mesasResult = await pool.query('SELECT * FROM mesas ORDER BY numero_mesa');
 
     // Obtener cuentas activas
     const cuentasResult = await pool.query(`
       SELECT
         cm.*,
-        m.numero as mesa_numero,
+        m.numero_mesa as mesa_numero,
         (SELECT COUNT(*) FROM items_cuenta WHERE cuenta_mesa_id = cm.id) as items_count
       FROM cuentas_mesa cm
       JOIN mesas m ON cm.mesa_id = m.id
@@ -5203,7 +5203,7 @@ app.get('/api/splitqr/estado-mesas', async (req, res) => {
       data: {
         mesas: mesasResult.rows.map(mesa => ({
           id: mesa.id,
-          numero: mesa.numero,
+          numero: mesa.numero_mesa,
           capacidad: mesa.capacidad,
           estado: mesa.estado || 'disponible',
           tiene_cuenta: cuentasResult.rows.some(c => c.mesa_id === mesa.id)
@@ -5225,10 +5225,14 @@ app.get('/api/splitqr/estado-mesas', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ [SPLITQR] Error obteniendo estado:', error);
+    console.error('❌ [SPLITQR] Error obteniendo estado de mesas:');
+    console.error('   - Error:', error.message);
+    console.error('   - Stack:', error.stack);
+    console.error('   - Timestamp:', new Date().toISOString());
     res.status(500).json({
       exito: false,
-      mensaje: 'Error interno del servidor'
+      mensaje: 'Error interno del servidor',
+      debug: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -5465,7 +5469,7 @@ app.get('/api/splitqr/cuenta/:id/qr-imagen', async (req, res) => {
   try {
     // Obtener información de la cuenta
     const cuentaResult = await pool.query(`
-      SELECT cm.qr_code_id, m.numero as mesa_numero
+      SELECT cm.qr_code_id, m.numero_mesa as mesa_numero
       FROM cuentas_mesa cm
       JOIN mesas m ON cm.mesa_id = m.id
       WHERE cm.id = $1 AND cm.estado IN ('abierta', 'parcial')
@@ -5523,7 +5527,7 @@ app.get('/api/splitqr/cuenta/:id/qr-url', async (req, res) => {
   try {
     // Obtener información de la cuenta
     const cuentaResult = await pool.query(`
-      SELECT cm.qr_code_id, m.numero as mesa_numero
+      SELECT cm.qr_code_id, m.numero_mesa as mesa_numero
       FROM cuentas_mesa cm
       JOIN mesas m ON cm.mesa_id = m.id
       WHERE cm.id = $1 AND cm.estado IN ('abierta', 'parcial')
