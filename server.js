@@ -10,6 +10,7 @@ const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
 const multer = require('multer');
+const QRCode = require('qrcode');
 require('dotenv').config();
 
 // Importar configuración de entorno dinámico
@@ -5392,6 +5393,176 @@ app.put('/api/splitqr/cuenta/:id/cerrar', async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// Regenerar QR para cuenta existente
+app.put('/api/splitqr/cuenta/:id/regenerar-qr', async (req, res) => {
+  const { id: cuenta_id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verificar que la cuenta existe y está activa
+    const cuentaCheck = await client.query(
+      'SELECT * FROM cuentas_mesa WHERE id = $1 AND estado IN ($2, $3)',
+      [cuenta_id, 'abierta', 'parcial']
+    );
+
+    if (cuentaCheck.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada o no está activa'
+      });
+    }
+
+    // Generar nuevo QR ID único
+    const nuevoQrCodeId = `QR${Date.now()}${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+
+    // Actualizar QR ID en la cuenta
+    const cuentaActualizada = await client.query(`
+      UPDATE cuentas_mesa
+      SET qr_code_id = $1, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING *
+    `, [nuevoQrCodeId, cuenta_id]);
+
+    await client.query('COMMIT');
+
+    console.log(`🔄 [SPLITQR] QR regenerado - Cuenta ${cuenta_id}: ${nuevoQrCodeId}`);
+
+    res.json({
+      exito: true,
+      mensaje: 'QR regenerado correctamente',
+      nuevo_qr_id: nuevoQrCodeId,
+      cuenta: {
+        id: cuentaActualizada.rows[0].id,
+        qr_code_id: cuentaActualizada.rows[0].qr_code_id,
+        estado: cuentaActualizada.rows[0].estado
+      }
+    });
+
+    // Sincronizar espejo después de cambios
+    setTimeout(() => actualizarArchivoEspejo(), 1000);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [SPLITQR] Error regenerando QR:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Generar imagen QR para cuenta
+app.get('/api/splitqr/cuenta/:id/qr-imagen', async (req, res) => {
+  const { id: cuenta_id } = req.params;
+  const { formato = 'png', tamaño = 256 } = req.query;
+
+  try {
+    // Obtener información de la cuenta
+    const cuentaResult = await pool.query(`
+      SELECT cm.qr_code_id, m.numero as mesa_numero
+      FROM cuentas_mesa cm
+      JOIN mesas m ON cm.mesa_id = m.id
+      WHERE cm.id = $1 AND cm.estado IN ('abierta', 'parcial')
+    `, [cuenta_id]);
+
+    if (cuentaResult.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada o no está activa'
+      });
+    }
+
+    const cuenta = cuentaResult.rows[0];
+    const paymentUrl = `${config.paymentModuleUrl}/mesa/${cuenta.qr_code_id}/pago`;
+
+    console.log(`📱 [SPLITQR] Generando QR imagen - Mesa ${cuenta.mesa_numero}, URL: ${paymentUrl}`);
+
+    // Generar QR como imagen
+    const qrOptions = {
+      type: formato === 'svg' ? 'svg' : 'png',
+      width: parseInt(tamaño),
+      margin: 2,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF'
+      },
+      errorCorrectionLevel: 'M'
+    };
+
+    if (formato === 'svg') {
+      const qrSvg = await QRCode.toString(paymentUrl, { ...qrOptions, type: 'svg' });
+      res.setHeader('Content-Type', 'image/svg+xml');
+      res.setHeader('Content-Disposition', `attachment; filename="qr-mesa-${cuenta.mesa_numero}.svg"`);
+      res.send(qrSvg);
+    } else {
+      const qrBuffer = await QRCode.toBuffer(paymentUrl, qrOptions);
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Disposition', `attachment; filename="qr-mesa-${cuenta.mesa_numero}.png"`);
+      res.send(qrBuffer);
+    }
+
+  } catch (error) {
+    console.error('❌ [SPLITQR] Error generando QR imagen:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error generando imagen QR'
+    });
+  }
+});
+
+// Obtener URL del QR para cuenta
+app.get('/api/splitqr/cuenta/:id/qr-url', async (req, res) => {
+  const { id: cuenta_id } = req.params;
+
+  try {
+    // Obtener información de la cuenta
+    const cuentaResult = await pool.query(`
+      SELECT cm.qr_code_id, m.numero as mesa_numero
+      FROM cuentas_mesa cm
+      JOIN mesas m ON cm.mesa_id = m.id
+      WHERE cm.id = $1 AND cm.estado IN ('abierta', 'parcial')
+    `, [cuenta_id]);
+
+    if (cuentaResult.rows.length === 0) {
+      return res.status(404).json({
+        exito: false,
+        mensaje: 'Cuenta no encontrada o no está activa'
+      });
+    }
+
+    const cuenta = cuentaResult.rows[0];
+    const paymentUrl = `${config.paymentModuleUrl}/mesa/${cuenta.qr_code_id}/pago`;
+
+    res.json({
+      exito: true,
+      data: {
+        qr_code_id: cuenta.qr_code_id,
+        mesa_numero: cuenta.mesa_numero,
+        payment_url: paymentUrl,
+        qr_data_url: paymentUrl
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [SPLITQR] Error obteniendo URL QR:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint alias para crear cuenta (mantener compatibilidad con rutas esperadas)
+app.post('/api/cuentas/mesa/:mesa_id', async (req, res) => {
+  // Redirigir al endpoint principal de SplitQR
+  req.url = `/api/splitqr/mesa/${req.params.mesa_id}/abrir-cuenta`;
+  return app._router.handle(req, res);
 });
 
 // Arrancar servidor

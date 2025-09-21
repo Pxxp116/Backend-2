@@ -85,6 +85,9 @@ const config = {
     dashboard: process.env.DASHBOARD_URL,
     chatbot: process.env.CHATBOT_URL || process.env.ORCHESTRATOR_URL
   },
+
+  // Payment module URL for QR codes
+  paymentModuleUrl: process.env.PAYMENT_MODULE_URL || 'https://gastrobot-payment.up.railway.app',
   
   // API configuration
   api: {
