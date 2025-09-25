@@ -87,7 +87,18 @@ const config = {
   },
 
   // Payment module URL for QR codes
-  paymentModuleUrl: process.env.PAYMENT_MODULE_URL || 'https://gastrobot-payment.up.railway.app',
+  paymentModuleUrl: process.env.PAYMENT_MODULE_URL || (() => {
+    // Intentar detectar automáticamente la URL del módulo de pago
+    if (process.env.RAILWAY_STATIC_URL) {
+      // En Railway, usar el patrón del servicio de pago
+      const baseUrl = process.env.RAILWAY_STATIC_URL;
+      const paymentUrl = baseUrl.replace(/backend(-\d+)?/, 'gastrobot-payment');
+      console.log('🔍 Auto-detectando URL de pago desde Railway:', paymentUrl);
+      return paymentUrl;
+    }
+    // Fallback para desarrollo local
+    return 'http://localhost:3000';
+  })(),
   
   // API configuration
   api: {

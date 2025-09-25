@@ -5562,6 +5562,32 @@ app.get('/api/splitqr/cuenta/:id/qr-url', async (req, res) => {
   }
 });
 
+// Endpoint para obtener configuración del módulo de pago (URLs dinámicas)
+app.get('/api/config/payment-module', async (req, res) => {
+  try {
+    // Detectar URL del módulo de pago dinámicamente
+    const paymentUrl = config.paymentModuleUrl || getPublicUrl('').replace(/\/$/, '').replace('backend', 'gastrobot-payment');
+
+    console.log(`📱 [CONFIG] Obteniendo URL del módulo de pago: ${paymentUrl}`);
+
+    res.json({
+      exito: true,
+      data: {
+        payment_module_url: paymentUrl,
+        api_base_url: config.baseUrl,
+        environment: config.isProduction ? 'production' : 'development',
+        is_railway: config.isRailway
+      }
+    });
+  } catch (error) {
+    console.error('❌ [CONFIG] Error obteniendo configuración:', error);
+    res.status(500).json({
+      exito: false,
+      mensaje: 'Error obteniendo configuración del módulo de pago'
+    });
+  }
+});
+
 // Endpoint alias para crear cuenta (mantener compatibilidad con rutas esperadas)
 app.post('/api/cuentas/mesa/:mesa_id', async (req, res) => {
   // Redirigir al endpoint principal de SplitQR
